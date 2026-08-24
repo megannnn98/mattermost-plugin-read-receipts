@@ -1,4 +1,4 @@
-module github.com/integrasources/mattermost-plugin-read-receipts
+module github.com/megannnn98/mattermost-plugin-read-receipts
 
 go 1.23.0
 

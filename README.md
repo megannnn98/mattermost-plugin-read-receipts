@@ -301,4 +301,4 @@ MIT
 
 ## Support
 
-Issues: https://github.com/integrasources/mattermost-plugin-read-receipts/issues
+Issues: https://github.com/megannnn98/mattermost-plugin-read-receipts/issues
