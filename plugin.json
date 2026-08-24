@@ -2,6 +2,7 @@
     "id": "com.integrasources.read-receipts",
     "name": "Read Receipts",
     "description": "Shows read receipts in 1:1 DM conversations on Mattermost Desktop.",
+    "version": "0.1.0",
     "homepage_url": "https://github.com/integrasources/mattermost-plugin-read-receipts",
     "support_url": "https://github.com/integrasources/mattermost-plugin-read-receipts/issues",
     "icon_path": "assets/icon.svg",
@@ -13,8 +14,7 @@
             "darwin-amd64": "server/dist/plugin-darwin-amd64",
             "darwin-arm64": "server/dist/plugin-darwin-arm64",
             "windows-amd64": "server/dist/plugin-windows-amd64.exe"
-        },
-        "executable": ""
+        }
     },
     "webapp": {
         "bundle_path": "webapp/dist/main.js"

@@ -1,8 +1,8 @@
 package main
 
 type configuration struct {
-	EnableDebugLogging    bool `json:"EnableDebugLogging"`
-	ReceiptRetentionDays  int  `json:"ReceiptRetentionDays"`
+	EnableDebugLogging   bool `json:"EnableDebugLogging"`
+	ReceiptRetentionDays int  `json:"ReceiptRetentionDays"`
 }
 
 func (c *configuration) Clone() *configuration {

@@ -1,47 +1,70 @@
-GO ?= $(shell which go)
-GOFLAGS ?= -ldflags '-s -w'
 PLUGIN_ID ?= com.integrasources.read-receipts
 PLUGIN_VERSION ?= 0.1.0
 BUNDLE_NAME ?= $(PLUGIN_ID)-$(PLUGIN_VERSION).tar.gz
 
-export PATH := /home/b/go-sdk/bin:$(PATH)
+# Optional local Go SDK: prepended only if the directory exists.
+# Override with `make GO_BIN_DIR=/path/to/go/bin` or set GO directly.
+GO_BIN_DIR ?= $(HOME)/go-sdk/bin
+export PATH := $(if $(wildcard $(GO_BIN_DIR)),$(GO_BIN_DIR):,)$(PATH)
+GO ?= go
+GOFLAGS ?= -ldflags '-s -w'
 
-.PHONY: all check-style dist server webapp test clean
+# Must stay in sync with plugin.json -> server.executables
+PLUGIN_TARGETS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
+
+.PHONY: all check-style check-style-server check-style-webapp dist server webapp \
+        test test-server test-webapp node-deps clean
 
 all: check-style test dist
 
-server:
-	cd server && go build $(GOFLAGS) -o dist/plugin-linux-amd64 .
+node-deps:
+	@test -d webapp/node_modules || (cd webapp && npm install --silent)
 
-webapp:
-	cd webapp && npm install --silent && npm run build
+server:
+	@cd server && for target in $(PLUGIN_TARGETS); do \
+		os=$${target%/*}; arch=$${target#*/}; ext=""; \
+		if [ "$$os" = "windows" ]; then ext=".exe"; fi; \
+		echo "building server/dist/plugin-$$os-$$arch$$ext"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build $(GOFLAGS) \
+			-o dist/plugin-$$os-$$arch$$ext . || exit 1; \
+	done
+
+webapp: node-deps
+	cd webapp && npm run build
 
 dist: server webapp
-	@mkdir -p dist
-	@rm -rf dist/$(PLUGIN_ID)
-	@mkdir -p dist/$(PLUGIN_ID)/server/dist
-	@mkdir -p dist/$(PLUGIN_ID)/webapp/dist
+	@mkdir -p dist/$(PLUGIN_ID)/server/dist dist/$(PLUGIN_ID)/webapp/dist
 	@cp plugin.json dist/$(PLUGIN_ID)/
-	@cp server/dist/plugin-linux-amd64 dist/$(PLUGIN_ID)/server/dist/ 2>/dev/null || true
-	@cp webapp/dist/main.js dist/$(PLUGIN_ID)/webapp/dist/ 2>/dev/null || true
+	@cp -r assets dist/$(PLUGIN_ID)/
+	@cp server/dist/plugin-* dist/$(PLUGIN_ID)/server/dist/
+	@cp webapp/dist/main.js dist/$(PLUGIN_ID)/webapp/dist/
 	@cd dist && tar -czf $(BUNDLE_NAME) $(PLUGIN_ID)
 	@echo "Built dist/$(BUNDLE_NAME)"
 
 test: test-server test-webapp
 
 test-server:
-	cd server && go test -v -race ./...
+	cd server && $(GO) test -race ./...
 
-test-webapp:
-	cd webapp && npm install --silent && npm run typecheck && npm run test
+test-webapp: node-deps
+	cd webapp && npm run typecheck && npm run test
 
 check-style: check-style-server check-style-webapp
 
 check-style-server:
-	@echo "Skipping golangci-lint (not installed)"
+	@cd server && unformatted="$$(gofmt -l .)"; \
+		if [ -n "$$unformatted" ]; then \
+			echo "gofmt required for:"; echo "$$unformatted"; exit 1; \
+		fi
+	cd server && $(GO) vet ./...
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		cd server && golangci-lint run ./...; \
+	else \
+		echo "golangci-lint not installed - skipped (gofmt + go vet enforced above)"; \
+	fi
 
-check-style-webapp:
-	cd webapp && npm install --silent && npm run lint || true
+check-style-webapp: node-deps
+	cd webapp && npm run lint
 
 clean:
 	rm -rf dist server/dist webapp/dist webapp/node_modules

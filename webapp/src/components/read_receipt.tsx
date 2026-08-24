@@ -4,6 +4,11 @@ import {sendReadReceipt} from '../actions';
 import {getStore} from '../store_ref';
 import {getVisibilityTracker} from '../visibility';
 import {isPostRead, selectPostReadAt} from '../selectors';
+import {getPostContext, shouldReportRead} from '../gating';
+import {formatReadTime, getLocaleFromState, t} from '../i18n';
+
+const DWELL_MS = 1000;
+const VISIBILITY_THRESHOLD = 0.75;
 
 interface ReadReceiptProps {
     postId: string;
@@ -33,64 +38,68 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
             return;
         }
 
-        const state = store.getState();
-        const post = state.entities?.posts?.posts?.[postId];
-        if (!post) {
-            return;
-        }
-
-        const isOwn = post.user_id === state.entities?.users?.currentUserId;
-        const channelId = post.channel_id;
-
-        if (isOwn) {
+        const ctx = getPostContext(store.getState(), postId);
+        if (!ctx || ctx.isOwn) {
             return;
         }
 
         const tracker = getVisibilityTracker();
 
+        const clearDwell = () => {
+            if (dwellTimerRef.current) {
+                clearTimeout(dwellTimerRef.current);
+                dwellTimerRef.current = null;
+            }
+        };
+
         const observer = new IntersectionObserver(
             (entries) => {
                 for (const entry of entries) {
-                    if (entry.isIntersecting && tracker.isActive()) {
-                        if (!hasReportedRef.current && !dwellTimerRef.current) {
-                            dwellTimerRef.current = setTimeout(() => {
-                                if (tracker.isActive() && !hasReportedRef.current) {
-                                    hasReportedRef.current = true;
-                                    sendReadReceipt(store, channelId, postId, post.create_at);
-                                }
-                                dwellTimerRef.current = null;
-                            }, 1000);
-                        }
-                    } else {
-                        if (dwellTimerRef.current) {
-                            clearTimeout(dwellTimerRef.current);
-                            dwellTimerRef.current = null;
-                        }
+                    if (!entry.isIntersecting || !tracker.isActive()) {
+                        clearDwell();
+                        continue;
                     }
+                    if (hasReportedRef.current || dwellTimerRef.current) {
+                        continue;
+                    }
+                    dwellTimerRef.current = setTimeout(() => {
+                        dwellTimerRef.current = null;
+
+                        // Re-checked on fire: the channel may have been switched
+                        // away, or the window blurred, while the timer was pending.
+                        if (hasReportedRef.current || !tracker.isActive()) {
+                            return;
+                        }
+                        const state = store.getState();
+                        if (!shouldReportRead(state, postId)) {
+                            return;
+                        }
+                        const current = getPostContext(state, postId);
+                        if (!current) {
+                            return;
+                        }
+                        hasReportedRef.current = true;
+                        sendReadReceipt(store, current.channelId, postId, current.createAt);
+                    }, DWELL_MS);
                 }
             },
-            {threshold: 0.75},
+            {threshold: VISIBILITY_THRESHOLD},
         );
 
         if (sentinelRef.current) {
             observer.observe(sentinelRef.current);
         }
 
-        const unsubTracker = tracker.subscribe((state) => {
-            if (!state.isVisible || !state.isFocused || state.isIdle) {
-                if (dwellTimerRef.current) {
-                    clearTimeout(dwellTimerRef.current);
-                    dwellTimerRef.current = null;
-                }
+        const unsubTracker = tracker.subscribe((visibility) => {
+            if (!visibility.isVisible || !visibility.isFocused || visibility.isIdle) {
+                clearDwell();
             }
         });
 
         return () => {
             observer.disconnect();
             unsubTracker();
-            if (dwellTimerRef.current) {
-                clearTimeout(dwellTimerRef.current);
-            }
+            clearDwell();
         };
     }, [postId, store]);
 
@@ -99,38 +108,46 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
     }
 
     const state = store.getState();
-    const post = state.entities?.posts?.posts?.[postId];
-    if (!post) {
+    const ctx = getPostContext(state, postId);
+    if (!ctx || !ctx.isDM) {
         return null;
     }
 
-    const isOwn = post.user_id === state.entities?.users?.currentUserId;
-    const channelId = post.channel_id;
-
-    if (!isOwn) {
-        return <span ref={sentinelRef} style={{height: 0, width: 0, display: 'block'}} aria-hidden="true" />;
+    if (!ctx.isOwn) {
+        return (
+            <span
+                ref={sentinelRef}
+                style={{height: 0, width: 0, display: 'block'}}
+                aria-hidden='true'
+            />
+        );
     }
 
-    const read = isPostRead(state, postId, post.create_at, channelId);
-    if (!read) {
+    if (!isPostRead(state, postId, ctx.createAt, ctx.channelId)) {
         return null;
     }
 
-    const readAt = selectPostReadAt(state, postId, post.create_at, channelId);
+    const readAt = selectPostReadAt(state, postId, ctx.createAt, ctx.channelId);
     if (!readAt) {
         return null;
     }
 
-    const date = new Date(readAt);
-    const time = date.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+    const locale = getLocaleFromState(state);
+    const time = formatReadTime(readAt, locale);
 
     return (
         <div
-            className="read-receipt-indicator"
-            title={`Прочитано в ${time}`}
+            className='read-receipt-indicator'
+            title={t(locale, 'readAt', {time})}
         >
-            <span style={{color: 'var(--center-channel-color-rgb)', opacity: 0.56, fontSize: '0.75rem'}}>
-                ✓✓ Прочитано {time}
+            <span
+                style={{
+                    color: 'var(--center-channel-color-rgb)',
+                    opacity: 0.56,
+                    fontSize: '0.75rem',
+                }}
+            >
+                {`✓✓ ${t(locale, 'read')} ${time}`}
             </span>
         </div>
     );

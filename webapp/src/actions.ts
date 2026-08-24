@@ -1,4 +1,5 @@
 import {PLUGIN_ID, fetchChannelReceipts, reportRead} from './client';
+import {ACTION_TYPES} from './reducer';
 
 class ReadDeduplicator {
     private sentCreateAt: Record<string, number> = {};
@@ -66,7 +67,7 @@ export async function loadChannelReceipts(
     try {
         const response = await fetchChannelReceipts(channelId, postIds);
         store.dispatch({
-            type: `${PLUGIN_ID}_RECEIPTS_QUERY`,
+            type: ACTION_TYPES.RECEIPTS_QUERY,
             data: {
                 channelId,
                 watermark: response.watermark,
@@ -94,7 +95,7 @@ export async function sendReadReceipt(
         const response = await reportRead(postId);
         dedup.markSent(channelId, postId, createAt);
         store.dispatch({
-            type: `${PLUGIN_ID}_WS_RECEIPT`,
+            type: ACTION_TYPES.WS_RECEIPT,
             data: {
                 channel_id: response.channel_id,
                 post_id: response.post_id,

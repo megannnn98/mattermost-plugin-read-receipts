@@ -22,7 +22,7 @@ type Plugin struct {
 
 	client *pluginapi.Client
 
-	configMu     sync.RWMutex
+	configMu      sync.RWMutex
 	configuration *configuration
 
 	router *http.ServeMux

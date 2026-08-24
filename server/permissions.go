@@ -8,11 +8,11 @@ import (
 )
 
 var (
-	ErrNotDMChannel     = errors.New("channel is not a DM")
-	ErrNotMember        = errors.New("user is not a member of the channel")
-	ErrAuthorSelfRead   = errors.New("author cannot mark own post as read")
-	ErrPostNotFound     = errors.New("post not found")
-	ErrChannelNotFound  = errors.New("channel not found")
+	ErrNotDMChannel    = errors.New("channel is not a DM")
+	ErrNotMember       = errors.New("user is not a member of the channel")
+	ErrAuthorSelfRead  = errors.New("author cannot mark own post as read")
+	ErrPostNotFound    = errors.New("post not found")
+	ErrChannelNotFound = errors.New("channel not found")
 )
 
 func (p *Plugin) validateReadRequest(userID, postID string) (*model.Post, *model.Channel, error) {

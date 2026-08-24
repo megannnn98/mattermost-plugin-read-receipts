@@ -6,12 +6,19 @@ export interface VisibilityState {
 
 export type VisibilityCallback = (state: VisibilityState) => void;
 
-export class VisibilityTracker {
-    private state: VisibilityState = {
-        isVisible: true,
-        isFocused: true,
+function initialVisibility(): VisibilityState {
+    if (typeof document === 'undefined' || typeof window === 'undefined') {
+        return {isVisible: false, isFocused: false, isIdle: false};
+    }
+    return {
+        isVisible: document.visibilityState !== 'hidden',
+        isFocused: typeof document.hasFocus === 'function' ? document.hasFocus() : true,
         isIdle: false,
     };
+}
+
+export class VisibilityTracker {
+    private state: VisibilityState = initialVisibility();
 
     private listeners: Set<VisibilityCallback> = new Set();
     private unsubscribeDesktop: (() => void) | null = null;

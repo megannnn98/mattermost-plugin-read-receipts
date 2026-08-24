@@ -41,7 +41,7 @@ export async function isDesktopClientAsync(): Promise<boolean> {
 
         cachedResult = true;
         return true;
-    } catch (e) {
+    } catch {
         cachedResult = false;
         return false;
     }
