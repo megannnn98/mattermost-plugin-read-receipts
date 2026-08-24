@@ -13,6 +13,13 @@ export function isDirectChannel(state: any, channelId: string): boolean | null {
 /**
  * Own, non-deleted posts of the channel, newest first, capped at `limit`.
  * Only own posts need receipts: the indicator is rendered for the sender only.
+ *
+ * The position of a block inside `postsInChannel` is deliberately not trusted:
+ * `mergePostBlocks` sorts blocks newest-first but bails out with the original
+ * array when no merge happened, so a freshly pushed block can sit anywhere.
+ * That is why the webapp's own selectors locate blocks by the `recent`/`oldest`
+ * flags instead of by index. Sorting the collected posts by `create_at` makes
+ * the result independent of both the block order and the order inside a block.
  */
 export function collectOwnPostIds(state: any, channelId: string, limit: number = MAX_QUERY_IDS): string[] {
     const currentUserId = state?.entities?.users?.currentUserId;
@@ -23,20 +30,21 @@ export function collectOwnPostIds(state: any, channelId: string, limit: number =
         return [];
     }
 
-    const postIds: string[] = [];
+    const own = new Map<string, number>();
     for (const block of blocks) {
         for (const postId of block?.order ?? []) {
             const post = posts[postId];
             if (!post || post.user_id !== currentUserId || post.delete_at) {
                 continue;
             }
-            postIds.push(postId);
-            if (postIds.length >= limit) {
-                return postIds;
-            }
+            own.set(postId, post.create_at);
         }
     }
-    return postIds;
+
+    return [...own.entries()].
+        sort((a, b) => b[1] - a[1]).
+        slice(0, limit).
+        map(([postId]) => postId);
 }
 
 export interface ChannelWatcher {
