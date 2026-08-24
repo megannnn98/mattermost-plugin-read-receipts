@@ -179,3 +179,53 @@ func TestHandleRead_NotMember(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
+
+func TestHandleRead_RepeatReturnsStoredReadAt(t *testing.T) {
+	p, api := setupTestPlugin(t)
+
+	userID := "user1"
+	postID := "post1"
+	channelID := "channel1"
+	storedReadAt := int64(123456789)
+
+	post := &model.Post{
+		Id:        postID,
+		UserId:    "user2",
+		ChannelId: channelID,
+		CreateAt:  1000,
+	}
+	channel := &model.Channel{
+		Id:   channelID,
+		Type: model.ChannelTypeDirect,
+	}
+
+	// A repeat read: the watermark already covers the post and the per-post
+	// receipt already exists (first-write-wins rejected the atomic write).
+	wmData, _ := json.Marshal(Watermark{PostID: postID, CreateAt: 1000, ReadAt: storedReadAt})
+	rrData, _ := json.Marshal(storedReadAt)
+
+	api.On("GetPost", postID).Return(post, nil)
+	api.On("GetChannel", channelID).Return(channel, nil)
+	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
+
+	api.On("KVGet", wmKey(channelID, userID)).Return(wmData, nil)
+	api.On("KVSetWithOptions", rrKey(postID, userID), mock.Anything, mock.Anything).Return(false, nil)
+	api.On("KVGet", rrKey(postID, userID)).Return(rrData, nil)
+
+	body, _ := json.Marshal(readRequest{PostID: postID})
+	req := httptest.NewRequest("POST", "/api/v1/read", bytes.NewReader(body))
+	req.Header.Set("Mattermost-User-Id", userID)
+
+	w := httptest.NewRecorder()
+	p.ServeHTTP(&plugin.Context{}, w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp readResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, postID, resp.PostID)
+	assert.Equal(t, storedReadAt, resp.ReadAt, "repeat read must report the stored read time, not a fresh timestamp")
+
+	api.AssertNotCalled(t, "PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything)
+}

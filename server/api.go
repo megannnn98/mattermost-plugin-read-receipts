@@ -115,6 +115,15 @@ func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Ch
 		ReaderID:  readerID,
 	}
 
+	if !written {
+		// First write wins: a receipt already exists for this reader. Report
+		// the stored read time so a repeated request is fully idempotent
+		// (the watermark did not advance either, so no WS event is sent).
+		if stored, err := p.getReceipt(post.Id, readerID); err == nil && stored != nil {
+			receipt.ReadAt = *stored
+		}
+	}
+
 	if wmAdvanced || written {
 		p.publishReceiptWS(receipt, post.UserId)
 	}

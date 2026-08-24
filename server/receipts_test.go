@@ -121,10 +121,13 @@ func TestMarkAsRead_Idempotency(t *testing.T) {
 
 	api.On("KVGet", wmKey(channelID, readerID)).Return(wmData, nil)
 	api.On("KVSetWithOptions", rrKey(postID, readerID), mock.Anything, mock.Anything).Return(false, nil)
+	rrData, _ := json.Marshal(existingWM.ReadAt)
+	api.On("KVGet", rrKey(postID, readerID)).Return(rrData, nil)
 
 	receipt, err := p.markAsRead(readerID, post, channel)
 	require.NoError(t, err)
 	require.NotNil(t, receipt)
+	assert.Equal(t, existingWM.ReadAt, receipt.ReadAt, "idempotent read must report the stored read time")
 
 	wsCalls := 0
 	for _, call := range api.Calls {
