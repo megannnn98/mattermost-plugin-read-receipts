@@ -1,0 +1,43 @@
+{
+    "id": "com.integrasources.read-receipts",
+    "name": "Read Receipts",
+    "description": "Shows read receipts in 1:1 DM conversations on Mattermost Desktop.",
+    "homepage_url": "https://github.com/integrasources/mattermost-plugin-read-receipts",
+    "support_url": "https://github.com/integrasources/mattermost-plugin-read-receipts/issues",
+    "icon_path": "assets/icon.svg",
+    "min_server_version": "9.5.0",
+    "server": {
+        "executables": {
+            "linux-amd64": "server/dist/plugin-linux-amd64",
+            "linux-arm64": "server/dist/plugin-linux-arm64",
+            "darwin-amd64": "server/dist/plugin-darwin-amd64",
+            "darwin-arm64": "server/dist/plugin-darwin-arm64",
+            "windows-amd64": "server/dist/plugin-windows-amd64.exe"
+        },
+        "executable": ""
+    },
+    "webapp": {
+        "bundle_path": "webapp/dist/main.js"
+    },
+    "settings_schema": {
+        "header": "Read Receipts plugin settings",
+        "footer": "",
+        "settings": [
+            {
+                "key": "EnableDebugLogging",
+                "display_name": "Enable debug logging",
+                "type": "bool",
+                "help_text": "When true, plugin logs debug events (post IDs, user IDs only — never message text).",
+                "default": false
+            },
+            {
+                "key": "ReceiptRetentionDays",
+                "display_name": "Receipt retention (days)",
+                "type": "number",
+                "help_text": "How many days per-post read timestamps are stored. After expiry only the watermark (fact of reading) remains with approximate time.",
+                "default": 30,
+                "placeholder": "30"
+            }
+        ]
+    }
+}
