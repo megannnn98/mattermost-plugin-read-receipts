@@ -17,6 +17,7 @@ interface ReadReceiptProps {
 export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
     const sentinelRef = useRef<HTMLSpanElement>(null);
     const dwellTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const lastIntersectingRef = useRef(false);
     const hasReportedRef = useRef(false);
     const [, forceUpdate] = useState(0);
 
@@ -52,35 +53,40 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
             }
         };
 
+        const startDwell = () => {
+            if (hasReportedRef.current || dwellTimerRef.current) {
+                return;
+            }
+            dwellTimerRef.current = setTimeout(() => {
+                dwellTimerRef.current = null;
+
+                // Re-checked on fire: the channel may have been switched
+                // away, or the window blurred, while the timer was pending.
+                if (hasReportedRef.current || !tracker.isActive()) {
+                    return;
+                }
+                const state = store.getState();
+                if (!shouldReportRead(state, postId)) {
+                    return;
+                }
+                const current = getPostContext(state, postId);
+                if (!current) {
+                    return;
+                }
+                hasReportedRef.current = true;
+                sendReadReceipt(store, current.channelId, postId, current.createAt);
+            }, DWELL_MS);
+        };
+
         const observer = new IntersectionObserver(
             (entries) => {
                 for (const entry of entries) {
+                    lastIntersectingRef.current = entry.isIntersecting;
                     if (!entry.isIntersecting || !tracker.isActive()) {
                         clearDwell();
                         continue;
                     }
-                    if (hasReportedRef.current || dwellTimerRef.current) {
-                        continue;
-                    }
-                    dwellTimerRef.current = setTimeout(() => {
-                        dwellTimerRef.current = null;
-
-                        // Re-checked on fire: the channel may have been switched
-                        // away, or the window blurred, while the timer was pending.
-                        if (hasReportedRef.current || !tracker.isActive()) {
-                            return;
-                        }
-                        const state = store.getState();
-                        if (!shouldReportRead(state, postId)) {
-                            return;
-                        }
-                        const current = getPostContext(state, postId);
-                        if (!current) {
-                            return;
-                        }
-                        hasReportedRef.current = true;
-                        sendReadReceipt(store, current.channelId, postId, current.createAt);
-                    }, DWELL_MS);
+                    startDwell();
                 }
             },
             {threshold: VISIBILITY_THRESHOLD},
@@ -93,6 +99,13 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         const unsubTracker = tracker.subscribe((visibility) => {
             if (!visibility.isVisible || !visibility.isFocused || visibility.isIdle) {
                 clearDwell();
+                return;
+            }
+            // The window became active again (focus/visibility/idle). No new
+            // IntersectionObserver callback fires for a post that is already
+            // visible, so restart the dwell from the last known intersection.
+            if (lastIntersectingRef.current) {
+                startDwell();
             }
         });
 
