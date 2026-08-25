@@ -6,6 +6,7 @@ const MESSAGES = {
     en: {
         read: 'Read',
         readAt: 'Read at {time}',
+        delivered: 'Delivered',
         readBy: 'Read by',
         readMore: 'and {count} more',
         readMoreTruncated: 'and more than {count}',
@@ -17,6 +18,7 @@ const MESSAGES = {
     ru: {
         read: 'Прочитано',
         readAt: 'Прочитано в {time}',
+        delivered: 'Доставлено',
         readBy: 'Прочитали',
         readMore: 'и ещё {count}',
         readMoreTruncated: 'и ещё более {count}',

@@ -108,12 +108,16 @@ describe('ReadReceipt in group, private and open channels', () => {
         document.body.innerHTML = '';
     });
 
-    // Only the indicator, never the message itself: an edited message would
-    // otherwise leak into the assertion.
+    // The indicator is an SVG plus an optional count, so it is described by its
+    // tick state rather than by the message text.
     const indicatorText = () => {
-        const text = document.querySelector('.post-message__text')!.textContent ?? '';
-        const match = text.match(/✓+(\s*\d+)?/);
-        return match ? match[0].trim() : '';
+        const tick = document.querySelector('.post-message__text svg[data-tick]');
+        if (!tick) {
+            return '';
+        }
+        const state = tick.getAttribute('data-tick');
+        const count = tick.parentElement?.textContent?.trim() ?? '';
+        return count ? `${state} ${count}` : state!;
     };
 
     it.each(['G', 'P', 'O'])('renders a sentinel for someone else post in a %s channel', (channelType) => {
@@ -141,7 +145,7 @@ describe('ReadReceipt in group, private and open channels', () => {
 
         act(() => root.render(<ReadReceipt postId='p1'/>));
 
-        expect(indicatorText()).toBe('✓✓ 2');
+        expect(indicatorText()).toBe('read 2');
     });
 
     // Regression: the mount used to be gated on an arbitrarily picked reader's
@@ -155,13 +159,33 @@ describe('ReadReceipt in group, private and open channels', () => {
 
         act(() => root.render(<ReadReceipt postId='p1'/>));
 
-        expect(indicatorText()).toBe('✓✓ 1');
+        expect(indicatorText()).toBe('read 1');
     });
 
-    it('renders nothing while nobody has read the post', () => {
+    it('shows a single delivered tick while nobody has read the post', () => {
         setStore(makeStore('G', {
             watermarks: {ch1: {stale: watermark('stale', 1000)}},
         }) as any);
+
+        act(() => root.render(<ReadReceipt postId='p1'/>));
+
+        expect(indicatorText()).toBe('delivered');
+    });
+
+    it('shows nothing at all while the post is still being sent', () => {
+        const store = makeStore('G') as any;
+        store.getState().entities.posts.posts.p1.pending_post_id = 'p1';
+        setStore(store);
+
+        act(() => root.render(<ReadReceipt postId='p1'/>));
+
+        expect(indicatorText()).toBe('');
+    });
+
+    it('shows nothing for a post the server refused', () => {
+        const store = makeStore('G') as any;
+        store.getState().entities.posts.posts.p1.state = 'FAILED';
+        setStore(store);
 
         act(() => root.render(<ReadReceipt postId='p1'/>));
 
@@ -187,7 +211,7 @@ describe('ReadReceipt in group, private and open channels', () => {
 
         act(() => root.render(<ReadReceipt postId='p1'/>));
 
-        expect(indicatorText()).toBe('✓✓');
+        expect(indicatorText()).toBe('read');
         expect(document.querySelector('.post-message__text span[title]')!.getAttribute('title')).toContain('Read at');
     });
 
@@ -261,7 +285,7 @@ describe('ReadReceipt in group, private and open channels', () => {
         const store = makeStore('G', {watermarks: {ch1: {a: watermark('a', 3000)}}}) as any;
         setStore(store);
         act(() => root.render(<ReadReceipt postId='p1'/>));
-        expect(indicatorText()).toBe('✓✓ 1');
+        expect(indicatorText()).toBe('read 1');
 
         // What an edit or a reaction does: React rebuilds the message and our
         // appended node goes with it. Nothing tells this component to re-render,
@@ -273,27 +297,27 @@ describe('ReadReceipt in group, private and open channels', () => {
 
         act(() => root.render(<ReadReceipt postId='p1'/>));
 
-        expect(indicatorText()).toBe('✓✓ 1');
+        expect(indicatorText()).toBe('read 1');
         expect(document.querySelector('.post-message__text p')!.textContent).toContain('edited');
     });
 
     it('re-attaches when the node was dropped without any state change', () => {
         setStore(makeStore('G', {watermarks: {ch1: {a: watermark('a', 3000)}}}) as any);
         act(() => root.render(<ReadReceipt postId='p1'/>));
-        expect(indicatorText()).toBe('✓✓ 1');
+        expect(indicatorText()).toBe('read 1');
 
         const text = document.querySelector('.post-message__text') as HTMLElement;
         text.innerHTML = '<p>hello</p>';
 
         act(() => root.render(<ReadReceipt postId='p1'/>));
 
-        expect(indicatorText()).toBe('✓✓ 1');
+        expect(indicatorText()).toBe('read 1');
     });
     it('notices a rebuilt message through the store, without being re-rendered by hand', () => {
         const store = makeStore('G', {watermarks: {ch1: {a: watermark('a', 3000)}}}) as any;
         setStore(store);
         act(() => root.render(<ReadReceipt postId='p1'/>));
-        expect(indicatorText()).toBe('✓✓ 1');
+        expect(indicatorText()).toBe('read 1');
 
         // In the real client nothing re-renders this component when the message
         // around it is rebuilt — it is a sibling of the message, not a child. The
@@ -303,6 +327,6 @@ describe('ReadReceipt in group, private and open channels', () => {
         text.innerHTML = '<p>edited</p>';
         act(() => store.patchPost({update_at: 5000, edit_at: 5000}));
 
-        expect(indicatorText()).toBe('✓✓ 1');
+        expect(indicatorText()).toBe('read 1');
     });
 });

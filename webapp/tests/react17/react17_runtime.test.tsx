@@ -90,7 +90,7 @@ describe('React 17 runtime', () => {
         act(() => {
             (ReactDOM as any).render(<ReadReceipt postId="p1"/>, container);
         });
-        expect(text.textContent).toBe('✓✓');
+        expect(text.querySelector('svg[data-tick="read"]')).not.toBeNull();
     });
     it('renders the group indicator and its popover on the React 17 the webapp ships', () => {
         // Mattermost 9.5+ gives plugins React 17.0.2: no createRoot, no
@@ -120,7 +120,8 @@ describe('React 17 runtime', () => {
         act(() => {
             (ReactDOM as any).render(<ReadReceipt postId="p1"/>, container);
         });
-        expect(text.textContent).toBe('✓✓ 1');
+        expect(text.querySelector('svg[data-tick="read"]')).not.toBeNull();
+        expect(text.textContent).toContain('1');
 
         act(() => {
             (text.querySelector('button') as HTMLButtonElement).click();

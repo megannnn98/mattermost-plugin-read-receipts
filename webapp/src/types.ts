@@ -32,6 +32,7 @@ export interface MMPost {
     create_at: number;
     update_at?: number;
     edit_at?: number;
+    pending_post_id?: string;
     delete_at?: number;
     state?: string;
 }

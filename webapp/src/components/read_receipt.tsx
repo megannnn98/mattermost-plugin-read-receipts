@@ -11,6 +11,7 @@ import {getPostContext, shouldReportRead} from '../gating';
 import {selectPostReadCount, selectSingleReaderReadAt, selectPluginState} from '../selectors';
 import {createInlineMount, InlineMount} from '../inline_mount';
 import {ReadersPopover, ReadersStatus} from './readers_popover';
+import {StatusTicks} from './status_ticks';
 import {GlobalState} from '../types';
 import {
     isSufficientlyVisible,
@@ -37,6 +38,23 @@ const isDMChannel = (state: GlobalState, postId: string): boolean => {
 };
 
 const isEligibleChannel = (state: GlobalState, postId: string): boolean => Boolean(getPostContext(state, postId)?.isEligibleChannel);
+
+/**
+ * A post counts as delivered once the server has accepted it — which is exactly
+ * what the single checkmark means in the messengers this indicator is modelled
+ * on. Mattermost has no per-device delivery signal at all, and the server-side
+ * `MessageHasBeenPosted` hook fires on that same acceptance, so storing a
+ * "delivered" flag would spend a KV key per post to record what the client can
+ * already see: the post exists and is neither pending nor failed.
+ */
+const isDelivered = (state: GlobalState, postId: string): boolean => {
+    const post = state?.entities?.posts?.posts?.[postId];
+    if (!post) {
+        return false;
+    }
+    const pending = Boolean(post.pending_post_id) && post.pending_post_id === post.id;
+    return !pending && post.state !== 'FAILED';
+};
 
 /**
  * A key that changes exactly when Mattermost rebuilds the rendered message.
@@ -68,6 +86,7 @@ type Display = {
     isOwn: boolean;
     isDM: boolean;
     eligible: boolean;
+    delivered: boolean;
     readAt: number | null;
     count: number;
     renderKey: string;
@@ -78,6 +97,7 @@ const isEqualDisplay = (a: Display, b: Display): boolean =>
     a.isOwn === b.isOwn &&
     a.isDM === b.isDM &&
     a.eligible === b.eligible &&
+    a.delivered === b.delivered &&
     a.readAt === b.readAt &&
     a.count === b.count &&
     a.renderKey === b.renderKey &&
@@ -112,12 +132,13 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
 
     const store = getStore();
 
-    const {isOwn, isDM, eligible, readAt, count, renderKey} = usePluginSelector(
+    const {isOwn, isDM, eligible, delivered, readAt, count, renderKey} = usePluginSelector(
         store,
         (state) => ({
             isOwn: isOwnPost(state, postId),
             isDM: isDMChannel(state, postId),
             eligible: isEligibleChannel(state, postId),
+            delivered: isDelivered(state, postId),
             readAt: selectReadAt(state, postId),
             count: selectReadCount(state, postId),
             renderKey: selectRenderKey(state, postId),
@@ -128,7 +149,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
     const locale = usePluginSelector<SupportedLocale>(store, (state) => getLocaleFromState(state));
 
     useEffect(() => {
-        if (!isOwn || count === 0 || !sentinelRef.current) {
+        if (!isOwn || !delivered || !sentinelRef.current) {
             return undefined;
         }
         const mount = createInlineMount(sentinelRef.current);
@@ -142,7 +163,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         // `renderKey` and `remounts` are dependencies on purpose: the first
         // re-runs the mount when Mattermost rebuilt the message around our node,
         // the second when the check below found the node already detached.
-    }, [isOwn, count, renderKey, remounts]);
+    }, [isOwn, delivered, renderKey, remounts]);
 
     // Runs after every render and costs one `isConnected` read. A detached target
     // means React dropped our node while rendering something else; bumping the
@@ -318,7 +339,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         );
     }
 
-    if (count === 0) {
+    if (!delivered) {
         return null;
     }
 
@@ -344,21 +365,59 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         readersStatus = readersFailed ? 'error' : 'loading';
     }
 
-    const indicator = isDM ? (
-        <span title={readAt === null ? undefined : t(locale, 'readAt', {time: formatReadTime(readAt, locale)})}>
-            {'✓✓'}
-        </span>
-    ) : (
-        <button
-            ref={anchorRef}
-            type='button'
-            onClick={openPopover}
-            aria-label={t(locale, 'readCount', {count: String(count)})}
-            style={{border: 0, background: 'none', padding: 0, color: 'inherit'}}
-        >
-            {`✓✓ ${count}`}
-        </button>
-    );
+    let indicator;
+    if (count === 0) {
+        // Accepted by the server, nobody has read it yet.
+        indicator = (
+            <span title={t(locale, 'delivered')}>
+                <StatusTicks
+                    status='delivered'
+                    label={t(locale, 'delivered')}
+                />
+            </span>
+        );
+    } else if (isDM) {
+        indicator = (
+            <span title={readAt === null ? t(locale, 'read') : t(locale, 'readAt', {time: formatReadTime(readAt, locale)})}>
+                <StatusTicks
+                    status='read'
+                    label={t(locale, 'read')}
+                />
+            </span>
+        );
+    } else {
+        indicator = (
+            <button
+                ref={anchorRef}
+                type='button'
+                onClick={openPopover}
+                aria-label={t(locale, 'readCount', {count: String(count)})}
+                // inline-flex, not per-child vertical-align: the wrapper collapses
+                // its line box to keep the post height, and aligning children
+                // against a collapsed line box drops the count like a subscript.
+                // The size is in px on purpose — Mattermost's root font-size is
+                // 10px, so `0.75rem` here is 7.5px and unreadable.
+                style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 3,
+                    verticalAlign: 'text-bottom',
+                    border: 0,
+                    background: 'none',
+                    padding: 0,
+                    color: 'inherit',
+                    cursor: 'pointer',
+                    lineHeight: 1,
+                }}
+            >
+                <StatusTicks
+                    status='read'
+                    label={t(locale, 'read')}
+                />
+                <span style={{fontSize: 11, color: 'var(--center-channel-color, #3f4350)', opacity: 0.72}}>{count}</span>
+            </button>
+        );
+    }
 
     const portal = (
         <>
