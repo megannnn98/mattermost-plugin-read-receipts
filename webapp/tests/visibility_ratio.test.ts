@@ -100,16 +100,69 @@ describe('resolveScrollRoot', () => {
         document.body.removeChild(list);
     });
 
-    it('skips ancestors that do not actually scroll', () => {
+    // The container is chosen by CSS alone. A channel with few posts, or one whose
+    // images have not loaded yet, does not overflow at mount time; the root is
+    // picked once, so a geometry-dependent choice would pin the observer to the
+    // window for the whole mount and bring back the unreachable tall-post branch.
+    it('picks the post list before it overflows, and keeps it after it grows', () => {
+        const list = scrollable('auto', 492, 492);   // scrollHeight === clientHeight
+        const post = document.createElement('div');
+        list.appendChild(post);
+        document.body.appendChild(list);
+
+        expect(resolveScrollRoot(post)).toBe(list);
+
+        // Async content (an image, an attachment, an expanded message) arrives.
+        Object.defineProperty(list, 'scrollHeight', {value: 6584, configurable: true});
+        expect(resolveScrollRoot(post)).toBe(list);
+
+        document.body.removeChild(list);
+    });
+
+    it('prefers the nearest scroll container over a farther one', () => {
         const outer = scrollable('auto', 5000, 492);
-        const inner = scrollable('auto', 100, 100);
+        const inner = scrollable('auto', 300, 300);
         outer.appendChild(inner);
         const post = document.createElement('div');
         inner.appendChild(post);
         document.body.appendChild(outer);
 
-        expect(resolveScrollRoot(post)).toBe(outer);
+        expect(resolveScrollRoot(post)).toBe(inner);
         document.body.removeChild(outer);
+    });
+
+    it.each([
+        ['visible', 'visible'],
+        ['hidden', 'hidden'],
+    ])('does not treat overflow-y: %s as a scroll root', (_name, overflowY) => {
+        // Measured in the live client: #postListContent, #post-list, .main-wrapper,
+        // #root and body are all overflow-y: hidden and sit ABOVE the real
+        // scroller, so they clip without scrolling and must not become the root.
+        const wrapper = scrollable(overflowY, 5000, 492);
+        const post = document.createElement('div');
+        wrapper.appendChild(post);
+        document.body.appendChild(wrapper);
+
+        expect(resolveScrollRoot(post)).toBeNull();
+        document.body.removeChild(wrapper);
+    });
+
+    it('walks past non-scrolling wrappers to reach the post list', () => {
+        // The live chain has three overflow-y: visible wrappers between .post and
+        // div.post-list__dynamic.
+        const list = scrollable('auto', 6584, 492);
+        let node: HTMLElement = list;
+        for (let i = 0; i < 3; i++) {
+            const wrapper = scrollable('visible', 6584, 6584);
+            node.appendChild(wrapper);
+            node = wrapper;
+        }
+        const post = document.createElement('div');
+        node.appendChild(post);
+        document.body.appendChild(list);
+
+        expect(resolveScrollRoot(post)).toBe(list);
+        document.body.removeChild(list);
     });
 
     it('returns null when nothing scrolls, keeping the viewport as the root', () => {

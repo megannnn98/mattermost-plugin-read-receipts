@@ -349,6 +349,45 @@ describe('ReadReceipt component', () => {
         document.body.removeChild(list);
     });
 
+    // The scroll root is resolved once, when the effect runs. A channel whose
+    // images or attachments have not loaded yet does not overflow at that moment,
+    // so a geometry-dependent root would pin the observer to the window for the
+    // whole mount and make the tall-post branch unreachable again.
+    it('uses the post list as root before it overflows, and still reports a tall post after it grows', async () => {
+        const list = document.createElement('div');
+        list.style.overflowY = 'auto';
+        Object.defineProperty(list, 'clientHeight', {value: 492, configurable: true});
+        Object.defineProperty(list, 'scrollHeight', {value: 492, configurable: true});   // not overflowing yet
+        const post = document.createElement('div');
+        post.className = 'post';
+        list.appendChild(post);
+        document.body.appendChild(list);
+
+        const localRoot = createRoot(post);
+        act(() => localRoot.render(<ReadReceipt postId="p1"/>));
+
+        expect(MockIntersectionObserver.root).toBe(list);
+
+        // Async content arrives and the list starts scrolling.
+        Object.defineProperty(list, 'scrollHeight', {value: 6584, configurable: true});
+
+        // Real geometry of a tall post against that list: ratio far below the
+        // threshold, but the visible slice fills the list.
+        MockIntersectionObserver.callback?.([{
+            isIntersecting: true,
+            intersectionRatio: 487 / 8063,
+            intersectionRect: {height: 487, width: 500},
+            rootBounds: {height: 492, width: 900},
+        }]);
+        act(() => jest.advanceTimersByTime(1000));
+        await flushMicrotasks();
+
+        expect(sendReadReceipt).toHaveBeenCalledWith('channel1', 'p1', 1000);
+
+        act(() => localRoot.unmount());
+        document.body.removeChild(list);
+    });
+
     it('aborts a scheduled retry when the window blurs during the backoff', async () => {
         const mSend = sendReadReceipt as jest.Mock;
         mSend.mockResolvedValueOnce(false);
