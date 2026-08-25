@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 
@@ -178,17 +179,74 @@ type queryRequest struct {
 	PostIDs   []string `json:"post_ids"`
 }
 
-type watermarkResponse struct {
-	ReaderID string `json:"reader_id"`
-	PostID   string `json:"post_id,omitempty"`
-	CreateAt int64  `json:"create_at,omitempty"`
-	ReadAt   int64  `json:"read_at,omitempty"`
+// postStatus is everything the sender is allowed to learn about one of their own
+// posts: how many people read it, whether that number is a lower bound, and —
+// only when the channel has a single reader — the exact time.
+//
+// Deliberately NOT per-reader watermarks. Those are channel-wide read positions:
+// handing them to every member would let anyone reconstruct who read whose
+// message and when, which is fine for a two-person DM and is not fine for a
+// group, a private channel or an open one.
+type postStatus struct {
+	Count     int   `json:"count"`
+	Truncated bool  `json:"truncated"`
+	ReadAt    int64 `json:"read_at,omitempty"`
 }
 
 type queryResponse struct {
-	Watermarks []watermarkResponse         `json:"watermarks"`
-	Receipts   map[string]map[string]int64 `json:"receipts"`
-	Truncated  bool                        `json:"truncated"`
+	Posts     map[string]postStatus `json:"posts"`
+	Truncated bool                  `json:"truncated"`
+}
+
+// maxPostPages bounds the fan-out of authorship validation. The plugin API has no
+// batch "get these post ids", so the alternative would be one GetPost per
+// requested id — up to 200 round trips per channel open. Paging the channel
+// instead answers the same question in at most maxPostPages calls; a requested
+// post older than that simply gets no status, which degrades the display and
+// never leaks anything.
+const maxPostPages = 3
+
+// resolveOwnPosts returns create_at for those requested ids that really are the
+// requester's own, live posts in this channel. Everything else — someone else's
+// post, a post from another channel, a deleted one, a fabricated id — is dropped
+// here, which is what keeps the endpoint from answering questions about posts the
+// caller does not own.
+func (p *Plugin) resolveOwnPosts(channel *model.Channel, userID string, postIDs []string) (map[string]int64, error) {
+	pending := make(map[string]struct{}, len(postIDs))
+	for _, postID := range postIDs {
+		if model.IsValidId(postID) {
+			pending[postID] = struct{}{}
+		}
+	}
+	own := make(map[string]int64, len(pending))
+	if len(pending) == 0 {
+		return own, nil
+	}
+
+	for page := 0; page < maxPostPages && len(pending) > 0; page++ {
+		list, appErr := p.API.GetPostsForChannel(channel.Id, page, maxQueryIDs)
+		if appErr != nil {
+			return nil, fmt.Errorf("get posts for channel: %s", appErr.Error())
+		}
+		if list == nil || len(list.Posts) == 0 {
+			break
+		}
+		for postID, post := range list.Posts {
+			if _, requested := pending[postID]; !requested {
+				continue
+			}
+			delete(pending, postID)
+			if post == nil || post.UserId != userID || post.ChannelId != channel.Id || post.DeleteAt != 0 {
+				continue
+			}
+			own[postID] = post.CreateAt
+		}
+		if len(list.Posts) < maxQueryIDs {
+			break
+		}
+	}
+
+	return own, nil
 }
 
 func (p *Plugin) handleQuery(w http.ResponseWriter, r *http.Request) {
@@ -225,25 +283,36 @@ func (p *Plugin) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	readers, _, err := p.getReaderIndex(channel.Id)
-	if err != nil {
-		p.logWarn("reader index read failed", "channel_id", channel.Id, "error", err.Error())
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	readers, truncated := boundedReaders(readers, userID)
-
 	postIDs := req.PostIDs
 	if len(postIDs) > maxQueryIDs {
 		postIDs = postIDs[:maxQueryIDs]
 	}
 
-	response := queryResponse{
-		Watermarks: make([]watermarkResponse, 0, len(readers)),
-		Receipts:   make(map[string]map[string]int64),
-		Truncated:  truncated,
+	own, err := p.resolveOwnPosts(channel, userID, postIDs)
+	if err != nil {
+		p.logWarn("resolve own posts failed", "channel_id", channel.Id, "error", err.Error())
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
-	for _, readerID := range readers {
+
+	response := queryResponse{Posts: make(map[string]postStatus, len(own))}
+	if len(own) == 0 {
+		p.writeJSON(w, response)
+		return
+	}
+
+	readers, err := p.channelReaders(channel.Id, userID, 0)
+	if err != nil {
+		p.logWarn("reader index read failed", "channel_id", channel.Id, "error", err.Error())
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	response.Truncated = readers.truncated
+
+	// One watermark per reader, never per post: the count of a post is simply how
+	// many readers have read past it, because the watermark is monotonic.
+	covers := make([]int64, 0, len(readers.ids))
+	for _, readerID := range readers.ids {
 		wm, err := p.getWatermark(channel.Id, readerID)
 		if err != nil {
 			p.logWarn("watermark read failed", "channel_id", channel.Id, "reader_id", readerID, "error", err.Error())
@@ -251,51 +320,41 @@ func (p *Plugin) handleQuery(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if wm != nil {
-			response.Watermarks = append(response.Watermarks, watermarkResponse{ReaderID: readerID, PostID: wm.PostID, CreateAt: wm.CreateAt, ReadAt: wm.ReadAt})
+			covers = append(covers, wm.CreateAt)
 		}
 	}
 
-	// Exact receipts preserve the v0.1 DM contract, but querying them for every
-	// reader in a group would turn one channel open into K*M KV reads.
-	if len(readers) == 1 {
-		readerID := readers[0]
-		for _, postID := range postIDs {
-			if !model.IsValidId(postID) {
-				continue
+	for postID, createAt := range own {
+		status := postStatus{Truncated: readers.truncated}
+		for _, covered := range covers {
+			if createAt <= covered {
+				status.Count++
 			}
-			readAt, err := p.getReceipt(channel.Id, postID, readerID)
+		}
+		// The exact time costs one read per post per reader, so it is served only
+		// for a single-reader channel — in practice a DM, which is where v0.1.0
+		// promised it. Authorship is already enforced above, so this is a cost
+		// rule, not a security one.
+		if status.Count == 1 && len(readers.ids) == 1 {
+			readAt, err := p.getReceipt(channel.Id, postID, readers.ids[0])
 			if err != nil {
 				p.logWarn("receipt read failed", "channel_id", channel.Id, "post_id", postID, "error", err.Error())
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
 			if readAt != nil {
-				response.Receipts[postID] = map[string]int64{readerID: *readAt}
+				status.ReadAt = *readAt
 			}
 		}
+		response.Posts[postID] = status
 	}
 
 	p.writeJSON(w, response)
 }
 
-func boundedReaders(index []string, excludedID string) ([]string, bool) {
-	readers := make([]string, 0, min(len(index), maxQueryReaders))
-	truncated := false
-	for _, readerID := range index {
-		if readerID == excludedID {
-			continue
-		}
-		if len(readers) == maxQueryReaders {
-			truncated = true
-			break
-		}
-		readers = append(readers, readerID)
-	}
-	return readers, truncated
-}
-
 type postReadersRequest struct {
 	PostID string `json:"post_id"`
+	Offset int    `json:"offset"`
 }
 
 type readerResponse struct {
@@ -305,8 +364,11 @@ type readerResponse struct {
 }
 
 type postReadersResponse struct {
-	Readers   []readerResponse `json:"readers"`
-	Truncated bool             `json:"truncated"`
+	Readers []readerResponse `json:"readers"`
+	// Truncated says the channel has more readers than this page covers, so the
+	// list is a prefix and the caller must not present it as complete.
+	Truncated  bool `json:"truncated"`
+	NextOffset int  `json:"next_offset,omitempty"`
 }
 
 func (p *Plugin) handlePostReaders(w http.ResponseWriter, r *http.Request) {
@@ -317,7 +379,7 @@ func (p *Plugin) handlePostReaders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req postReadersRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !model.IsValidId(req.PostID) {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !model.IsValidId(req.PostID) || req.Offset < 0 {
 		http.Error(w, "post_id required", http.StatusBadRequest)
 		return
 	}
@@ -337,6 +399,8 @@ func (p *Plugin) handlePostReaders(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Who read a message is the author's information. A channel member asking
+	// about someone else's post gets nothing, in every channel type.
 	if post.UserId != userID {
 		http.Error(w, "only the post author can query readers", http.StatusForbidden)
 		return
@@ -345,15 +409,20 @@ func (p *Plugin) handlePostReaders(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "post not found", http.StatusNotFound)
 		return
 	}
-	index, _, err := p.getReaderIndex(channel.Id)
+
+	readers, err := p.channelReaders(channel.Id, userID, req.Offset)
 	if err != nil {
 		p.logWarn("reader index read failed", "channel_id", channel.Id, "error", err.Error())
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	readers, truncated := boundedReaders(index, userID)
-	response := postReadersResponse{Readers: make([]readerResponse, 0, len(readers)), Truncated: truncated}
-	for _, readerID := range readers {
+
+	response := postReadersResponse{
+		Readers:    make([]readerResponse, 0, len(readers.ids)),
+		Truncated:  readers.truncated,
+		NextOffset: readers.nextOffset,
+	}
+	for _, readerID := range readers.ids {
 		receipt, err := p.getReceipt(channel.Id, post.Id, readerID)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)

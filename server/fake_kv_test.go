@@ -111,3 +111,50 @@ func wireKV(api *plugintest.API, kv *fakeKV) {
 		},
 	)
 }
+
+// stubChannelPosts makes GetPostsForChannel answer the authorship check with
+// exactly these posts. A single short page is enough: resolveOwnPosts stops
+// paging as soon as a page comes back smaller than the request size.
+func stubChannelPosts(api *plugintest.API, channelID string, posts ...*model.Post) {
+	list := &model.PostList{Order: make([]string, 0, len(posts)), Posts: make(map[string]*model.Post, len(posts))}
+	for _, post := range posts {
+		list.Order = append(list.Order, post.Id)
+		list.Posts[post.Id] = post
+	}
+	api.On("GetPostsForChannel", channelID, 0, maxQueryIDs).Return(list, nil)
+}
+
+// stubMembers makes GetChannelMembersByIds report exactly memberIDs as members;
+// any other id is treated as someone who has left the channel.
+func stubMembers(api *plugintest.API, channelID string, memberIDs ...string) {
+	allowed := make(map[string]struct{}, len(memberIDs))
+	for _, id := range memberIDs {
+		allowed[id] = struct{}{}
+	}
+	api.On("GetChannelMembersByIds", channelID, mock.Anything).Return(
+		func(_ string, userIDs []string) model.ChannelMembers {
+			members := model.ChannelMembers{}
+			for _, id := range userIDs {
+				if _, ok := allowed[id]; ok {
+					members = append(members, model.ChannelMember{UserId: id, ChannelId: channelID})
+				}
+			}
+			return members
+		},
+		func(_ string, _ []string) *model.AppError { return nil },
+	)
+}
+
+// stubAllMembers treats every queried id as a current member.
+func stubAllMembers(api *plugintest.API, channelID string) {
+	api.On("GetChannelMembersByIds", channelID, mock.Anything).Return(
+		func(_ string, userIDs []string) model.ChannelMembers {
+			members := model.ChannelMembers{}
+			for _, id := range userIDs {
+				members = append(members, model.ChannelMember{UserId: id, ChannelId: channelID})
+			}
+			return members
+		},
+		func(_ string, _ []string) *model.AppError { return nil },
+	)
+}

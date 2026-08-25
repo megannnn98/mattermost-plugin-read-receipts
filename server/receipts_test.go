@@ -162,6 +162,11 @@ func TestHandleQuery_Success(t *testing.T) {
 
 	api.On("GetChannel", channelID).Return(channel, nil)
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
+	stubChannelPosts(api, channelID,
+		&model.Post{Id: postID1, UserId: userID, ChannelId: channelID, CreateAt: 1000},
+		&model.Post{Id: postID2, UserId: userID, ChannelId: channelID, CreateAt: 2000},
+	)
+	stubAllMembers(api, channelID)
 	indexData, _ := json.Marshal([]string{otherUserID})
 	api.On("KVGet", idxKey(channelID)).Return(indexData, nil)
 
@@ -195,15 +200,13 @@ func TestHandleQuery_Success(t *testing.T) {
 	err := json.NewDecoder(w.Body).Decode(&resp)
 	require.NoError(t, err)
 
-	require.Len(t, resp.Watermarks, 1)
-	assert.Equal(t, otherUserID, resp.Watermarks[0].ReaderID)
-	assert.Equal(t, postID2, resp.Watermarks[0].PostID)
-	assert.Equal(t, int64(2000), resp.Watermarks[0].CreateAt)
-
-	require.NotNil(t, resp.Receipts)
-	assert.Equal(t, readAt1, resp.Receipts[postID1][otherUserID])
-	_, hasPost2 := resp.Receipts[postID2]
-	assert.False(t, hasPost2, "post2 should not have explicit receipt (covered by watermark)")
+	// The single reader's watermark covers both posts, and a single-reader channel
+	// still gets the exact time from the per-post receipt where one survives.
+	assert.Equal(t, 1, resp.Posts[postID1].Count)
+	assert.Equal(t, readAt1, resp.Posts[postID1].ReadAt)
+	assert.Equal(t, 1, resp.Posts[postID2].Count)
+	assert.Zero(t, resp.Posts[postID2].ReadAt, "post2 has no explicit receipt; it is only covered by the watermark")
+	assert.False(t, resp.Truncated)
 }
 
 func TestHandleQuery_NonDM(t *testing.T) {

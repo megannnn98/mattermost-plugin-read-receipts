@@ -94,9 +94,9 @@ func TestEnsureReaderIndexed_RepeatDoesNotWrite(t *testing.T) {
 	assert.Zero(t, writes, "an already indexed reader must not be written again")
 }
 
-// Overflow is a bounded-cost decision, not an error: the read still succeeds,
+// A full index is a bounded-cost decision, not an error: the read still succeeds,
 // the reader is simply not counted (documented residual risk).
-func TestEnsureReaderIndexed_OverflowIsNotAnError(t *testing.T) {
+func TestEnsureReaderIndexed_FullIndexOfMembersIsNotAnError(t *testing.T) {
 	kv := newFakeKV()
 	p, api := setupTestPlugin(t)
 	wireKV(api, kv)
@@ -107,9 +107,91 @@ func TestEnsureReaderIndexed_OverflowIsNotAnError(t *testing.T) {
 		full = append(full, validID(fmt.Sprintf("full%d", i)))
 	}
 	kv.set(idxKey(channelID), mustJSON(t, full))
+	stubMembers(api, channelID, full...)
 
 	require.NoError(t, p.ensureReaderIndexed(channelID, validID("rdrOverflow")))
 	assert.Len(t, readIndex(t, kv, channelID), maxIndexReaders, "the index must stay capped and keep what it had")
+}
+
+// The index is append-only and never expires, so without pruning a channel with
+// enough turnover would fill up with people who left and stop counting anyone new.
+func TestEnsureReaderIndexed_PrunesDepartedReadersWhenFull(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+
+	channelID := validID("chanIdxChurn")
+	stayed := make([]string, 0, maxIndexReaders)
+	departed := make([]string, 0, 10)
+	index := make([]string, 0, maxIndexReaders)
+	for i := 0; i < maxIndexReaders; i++ {
+		id := validID(fmt.Sprintf("churn%d", i))
+		index = append(index, id)
+		if i < 10 {
+			departed = append(departed, id)
+		} else {
+			stayed = append(stayed, id)
+		}
+	}
+	kv.set(idxKey(channelID), mustJSON(t, index))
+
+	newcomer := validID("rdrNewcomer")
+	stubMembers(api, channelID, append(append([]string{}, stayed...), newcomer)...)
+
+	require.NoError(t, p.ensureReaderIndexed(channelID, newcomer))
+
+	stored := readIndex(t, kv, channelID)
+	assert.Len(t, stored, len(stayed)+1)
+	assert.Equal(t, newcomer, stored[len(stored)-1], "a live reader must get in once the departed ones are pruned")
+	for _, gone := range departed {
+		assert.NotContains(t, stored, gone, "a reader who left the channel must not keep occupying the index")
+	}
+}
+
+// A reader who has left the channel must not have their read activity reported,
+// even while they are still recorded in the index.
+func TestChannelReaders_ExcludesDepartedReaders(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+
+	channelID := validID("chanChurnRead")
+	stayed := validID("stayedReader")
+	left := validID("leftReader")
+	requester := validID("requesterChurn")
+	kv.set(idxKey(channelID), mustJSON(t, []string{stayed, left, requester}))
+	stubMembers(api, channelID, stayed, requester)
+
+	page, err := p.channelReaders(channelID, requester, 0)
+	require.NoError(t, err)
+	assert.Equal(t, []string{stayed}, page.ids)
+	assert.False(t, page.truncated)
+}
+
+func TestChannelReaders_PagesThroughALargeIndex(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+
+	channelID := validID("chanPaged")
+	readers := make([]string, 0, maxQueryReaders+7)
+	for i := 0; i < maxQueryReaders+7; i++ {
+		readers = append(readers, validID(fmt.Sprintf("paged%d", i)))
+	}
+	kv.set(idxKey(channelID), mustJSON(t, readers))
+	stubAllMembers(api, channelID)
+
+	first, err := p.channelReaders(channelID, "", 0)
+	require.NoError(t, err)
+	require.Len(t, first.ids, maxQueryReaders)
+	require.True(t, first.truncated, "a full page must announce that more readers exist")
+	require.Equal(t, maxQueryReaders, first.nextOffset)
+
+	second, err := p.channelReaders(channelID, "", first.nextOffset)
+	require.NoError(t, err)
+	assert.Len(t, second.ids, 7, "the rest of the index must be reachable rather than silently dropped")
+	assert.False(t, second.truncated)
+	assert.Zero(t, second.nextOffset)
 }
 
 // v0.1.0 installations have wm_ keys but no idx_ key. The first read after the
@@ -158,106 +240,259 @@ func TestMarkAsRead_IndexesReaderOnCoveredPost(t *testing.T) {
 
 // --- Group query ------------------------------------------------------------
 
-func TestHandleQuery_GroupReturnsWatermarkPerReader(t *testing.T) {
+func TestHandleQuery_GroupCountsReadersWithoutExposingThem(t *testing.T) {
 	kv := newFakeKV()
 	p, api := setupTestPlugin(t)
 	wireKV(api, kv)
+	p.configuration.EnabledChannelTypes = allChannelTypes
 
 	userID := validID("authorGroup")
 	readerA := validID("groupA")
 	readerB := validID("groupB")
 	channelID := validID("chanGroupQ")
+	newPost := &model.Post{Id: validID("pNew"), UserId: userID, ChannelId: channelID, CreateAt: 2000}
+	oldPost := &model.Post{Id: validID("pOld"), UserId: userID, ChannelId: channelID, CreateAt: 500}
 
 	api.On("GetChannel", channelID).Return(&model.Channel{Id: channelID, Type: model.ChannelTypeGroup}, nil)
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
+	stubChannelPosts(api, channelID, newPost, oldPost)
+	stubAllMembers(api, channelID)
 
-	// The requester is in the index too (they read other people's posts here).
+	// The requester is in the index too — they read other people's posts here.
 	kv.set(idxKey(channelID), mustJSON(t, []string{readerA, userID, readerB}))
-	kv.set(wmKey(channelID, readerA), mustJSON(t, Watermark{PostID: validID("pA"), CreateAt: 3000, ReadAt: 3100}))
-	kv.set(wmKey(channelID, readerB), mustJSON(t, Watermark{PostID: validID("pB"), CreateAt: 1000, ReadAt: 1100}))
+	kv.set(wmKey(channelID, readerA), mustJSON(t, Watermark{PostID: newPost.Id, CreateAt: 3000, ReadAt: 3100}))
+	kv.set(wmKey(channelID, readerB), mustJSON(t, Watermark{PostID: oldPost.Id, CreateAt: 1000, ReadAt: 1100}))
 	kv.set(wmKey(channelID, userID), mustJSON(t, Watermark{PostID: validID("pSelf"), CreateAt: 9000, ReadAt: 9100}))
 
-	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{validID("anyPost")}}), userID)
+	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{newPost.Id, oldPost.Id}}), userID)
 	require.Equal(t, http.StatusOK, w.Code)
 
 	var resp queryResponse
-	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	require.Len(t, resp.Watermarks, 2, "the requester's own watermark must not be reported back to them")
+	body := w.Body.String()
+	require.NoError(t, json.Unmarshal([]byte(body), &resp))
 
-	byReader := map[string]watermarkResponse{}
-	for _, wm := range resp.Watermarks {
-		byReader[wm.ReaderID] = wm
-	}
-	assert.Equal(t, int64(3000), byReader[readerA].CreateAt)
-	assert.Equal(t, int64(1000), byReader[readerB].CreateAt)
-	assert.NotContains(t, byReader, userID)
+	assert.Equal(t, 1, resp.Posts[newPost.Id].Count, "only reader A has read past the newer post")
+	assert.Equal(t, 2, resp.Posts[oldPost.Id].Count, "both readers have read past the older post")
 	assert.False(t, resp.Truncated)
+
+	// The response must not carry per-reader read positions in any form: those are
+	// channel-wide and would let a member reconstruct who read what and when.
+	for _, id := range []string{readerA, readerB, userID} {
+		assert.NotContains(t, body, id, "the response must not name channel readers")
+	}
+	assert.NotContains(t, body, "watermark")
 }
 
-// Exact per-post receipts cost K*M reads, so they are only served for a single
-// reader — in practice a DM. Groups get exact times from /receipts/post.
-func TestHandleQuery_ExactReceiptsOnlyForSingleReader(t *testing.T) {
-	postID := validID("sharedPost")
-
-	setup := func(t *testing.T, readers []string) queryResponse {
+// Exact per-post receipts cost one read per post per reader, so they are served
+// only for a single-reader channel — in practice a DM, which is where v0.1.0
+// promised them. Authorship is enforced separately, so this is a cost rule.
+func TestHandleQuery_ExactTimeOnlyForASingleReader(t *testing.T) {
+	setup := func(t *testing.T, readers []string) (queryResponse, string) {
 		t.Helper()
 		kv := newFakeKV()
 		p, api := setupTestPlugin(t)
 		wireKV(api, kv)
+		p.configuration.EnabledChannelTypes = allChannelTypes
 
 		userID := validID("authorExact")
 		channelID := validID("chanExact")
+		post := &model.Post{Id: validID("sharedPost"), UserId: userID, ChannelId: channelID, CreateAt: 1000}
 		api.On("GetChannel", channelID).Return(&model.Channel{Id: channelID, Type: model.ChannelTypeGroup}, nil)
 		api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
+		stubChannelPosts(api, channelID, post)
+		stubAllMembers(api, channelID)
 
 		kv.set(idxKey(channelID), mustJSON(t, readers))
 		for _, readerID := range readers {
-			kv.set(rrKey(channelID, postID, readerID), mustJSON(t, int64(4200)))
+			kv.set(rrKey(channelID, post.Id, readerID), mustJSON(t, int64(4200)))
+			kv.set(wmKey(channelID, readerID), mustJSON(t, Watermark{PostID: post.Id, CreateAt: 1000, ReadAt: 4200}))
 		}
 
-		w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{postID}}), userID)
+		w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{post.Id}}), userID)
 		require.Equal(t, http.StatusOK, w.Code)
 		var resp queryResponse
 		require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-		return resp
+		return resp, post.Id
 	}
 
-	single := validID("soleReader")
-	resp := setup(t, []string{single})
-	assert.Equal(t, int64(4200), resp.Receipts[postID][single], "a single reader keeps the exact v0.1 contract")
+	resp, postID := setup(t, []string{validID("soleReader")})
+	assert.Equal(t, int64(4200), resp.Posts[postID].ReadAt, "a single reader keeps the exact v0.1 contract")
 
-	resp = setup(t, []string{validID("manyA"), validID("manyB")})
-	assert.Empty(t, resp.Receipts, "more than one reader must not trigger K*M receipt reads")
+	resp, postID = setup(t, []string{validID("manyA"), validID("manyB")})
+	assert.Equal(t, 2, resp.Posts[postID].Count)
+	assert.Zero(t, resp.Posts[postID].ReadAt, "more than one reader must not trigger a read per post per reader")
 }
 
-func TestHandleQuery_TruncatesReaderList(t *testing.T) {
+func TestHandleQuery_ReportsATruncatedCountAsALowerBound(t *testing.T) {
 	kv := newFakeKV()
 	p, api := setupTestPlugin(t)
 	wireKV(api, kv)
+	p.configuration.EnabledChannelTypes = allChannelTypes
 
 	userID := validID("authorTrunc")
 	channelID := validID("chanTrunc")
+	post := &model.Post{Id: validID("crowdPost"), UserId: userID, ChannelId: channelID, CreateAt: 500}
 	api.On("GetChannel", channelID).Return(&model.Channel{Id: channelID, Type: model.ChannelTypeOpen}, nil)
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
+	stubChannelPosts(api, channelID, post)
+	stubAllMembers(api, channelID)
 
 	readers := make([]string, 0, maxQueryReaders+5)
 	for i := 0; i < maxQueryReaders+5; i++ {
 		readerID := validID(fmt.Sprintf("crowd%d", i))
 		readers = append(readers, readerID)
-		kv.set(wmKey(channelID, readerID), mustJSON(t, Watermark{PostID: validID("pc"), CreateAt: 1000, ReadAt: 1100}))
+		kv.set(wmKey(channelID, readerID), mustJSON(t, Watermark{PostID: post.Id, CreateAt: 1000, ReadAt: 1100}))
 	}
 	kv.set(idxKey(channelID), mustJSON(t, readers))
 
-	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID}), userID)
+	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{post.Id}}), userID)
 	require.Equal(t, http.StatusOK, w.Code)
 
 	var resp queryResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	assert.Len(t, resp.Watermarks, maxQueryReaders)
-	assert.True(t, resp.Truncated, "a capped reader list must say so instead of silently shrinking")
+	assert.Equal(t, maxQueryReaders, resp.Posts[post.Id].Count)
+	assert.True(t, resp.Truncated, "a capped reader list must say so instead of passing a prefix off as the whole channel")
+	assert.True(t, resp.Posts[post.Id].Truncated)
+}
+
+// --- Authorization ----------------------------------------------------------
+
+func TestHandleQuery_RefusesToAnswerAboutAnotherAuthorsPost(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	p.configuration.EnabledChannelTypes = allChannelTypes
+
+	memberA := validID("memberA")
+	authorB := validID("authorB")
+	readerC := validID("readerC")
+	channelID := validID("chanForeign")
+	foreign := &model.Post{Id: validID("postOfB"), UserId: authorB, ChannelId: channelID, CreateAt: 1000}
+	mine := &model.Post{Id: validID("postOfA"), UserId: memberA, ChannelId: channelID, CreateAt: 1000}
+
+	api.On("GetChannel", channelID).Return(&model.Channel{Id: channelID, Type: model.ChannelTypeGroup}, nil)
+	api.On("HasPermissionToChannel", memberA, channelID, model.PermissionReadChannel).Return(true)
+	stubChannelPosts(api, channelID, foreign, mine)
+	stubAllMembers(api, channelID)
+
+	kv.set(idxKey(channelID), mustJSON(t, []string{readerC}))
+	kv.set(wmKey(channelID, readerC), mustJSON(t, Watermark{PostID: foreign.Id, CreateAt: 5000, ReadAt: 5100}))
+	kv.set(rrKey(channelID, foreign.Id, readerC), mustJSON(t, int64(5100)))
+
+	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{foreign.Id, mine.Id}}), memberA)
+	require.Equal(t, http.StatusOK, w.Code, "a member may still ask about the channel; they just get nothing about someone else's post")
+
+	var resp queryResponse
+	body := w.Body.String()
+	require.NoError(t, json.Unmarshal([]byte(body), &resp))
+
+	_, leaked := resp.Posts[foreign.Id]
+	assert.False(t, leaked, "the read state of another member's post must not be reported")
+	assert.NotContains(t, body, readerC, "the reader of another member's post must not be named")
+	assert.Equal(t, 1, resp.Posts[mine.Id].Count, "the caller still sees the status of their own post")
+}
+
+func TestHandleQuery_ForeignChannelPostIDIsIgnored(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	p.configuration.EnabledChannelTypes = allChannelTypes
+
+	userID := validID("authorCross")
+	readerID := validID("readerCross")
+	channelID := validID("chanHere")
+	otherChannelID := validID("chanThere")
+	// The caller authored it, but in a different channel; paging this channel
+	// never returns it, so it can never be answered.
+	elsewhere := validID("postElsewhere")
+
+	api.On("GetChannel", channelID).Return(&model.Channel{Id: channelID, Type: model.ChannelTypeGroup}, nil)
+	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
+	stubChannelPosts(api, channelID)
+	stubAllMembers(api, channelID)
+
+	kv.set(idxKey(channelID), mustJSON(t, []string{readerID}))
+	kv.set(wmKey(channelID, readerID), mustJSON(t, Watermark{PostID: validID("pw"), CreateAt: 9000, ReadAt: 9100}))
+	kv.set(rrKey(otherChannelID, elsewhere, readerID), mustJSON(t, int64(9100)))
+
+	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{elsewhere}}), userID)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp queryResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Empty(t, resp.Posts)
+}
+
+// Channel scope is structural — posts only ever come from paging *this* channel —
+// but the explicit check is kept as defence in depth, so it gets a test that
+// exercises it directly: a post claiming a different channel is dropped even when
+// the channel listing hands it over.
+func TestHandleQuery_PostClaimingAnotherChannelIsDropped(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	p.configuration.EnabledChannelTypes = allChannelTypes
+
+	userID := validID("authorScope")
+	readerID := validID("readerScope")
+	channelID := validID("chanScope")
+	mislabelled := &model.Post{Id: validID("postScope"), UserId: userID, ChannelId: validID("chanOther"), CreateAt: 1000}
+
+	api.On("GetChannel", channelID).Return(&model.Channel{Id: channelID, Type: model.ChannelTypeGroup}, nil)
+	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
+	stubChannelPosts(api, channelID, mislabelled)
+	stubAllMembers(api, channelID)
+	kv.set(idxKey(channelID), mustJSON(t, []string{readerID}))
+	kv.set(wmKey(channelID, readerID), mustJSON(t, Watermark{PostID: mislabelled.Id, CreateAt: 5000, ReadAt: 5100}))
+
+	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{mislabelled.Id}}), userID)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp queryResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Empty(t, resp.Posts)
+}
+
+func TestHandleQuery_DeletedOwnPostGetsNoStatus(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	p.configuration.EnabledChannelTypes = allChannelTypes
+
+	userID := validID("authorDel")
+	readerID := validID("readerDel")
+	channelID := validID("chanDel")
+	deleted := &model.Post{Id: validID("postDel"), UserId: userID, ChannelId: channelID, CreateAt: 1000, DeleteAt: 2000}
+
+	api.On("GetChannel", channelID).Return(&model.Channel{Id: channelID, Type: model.ChannelTypeGroup}, nil)
+	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
+	stubChannelPosts(api, channelID, deleted)
+	stubAllMembers(api, channelID)
+	kv.set(idxKey(channelID), mustJSON(t, []string{readerID}))
+	kv.set(wmKey(channelID, readerID), mustJSON(t, Watermark{PostID: deleted.Id, CreateAt: 5000, ReadAt: 5100}))
+
+	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{deleted.Id}}), userID)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp queryResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Empty(t, resp.Posts)
 }
 
 // --- Channel types ----------------------------------------------------------
+
+func TestChannelTypes_OnlyDirectIsEnabledOutOfTheBox(t *testing.T) {
+	// v0.1.0 collected receipts in direct messages only. Upgrading must not
+	// silently start collecting them across every group, private and open channel
+	// of an installation, so anything beyond D is an explicit decision.
+	valid, _ := (&configuration{ReceiptRetentionDays: 30}).validate()
+	assert.Equal(t, "D", valid.EnabledChannelTypes)
+
+	for _, channelType := range []string{"G", "P", "O"} {
+		assert.False(t, valid.channelTypeEnabled(channelType), "%s must be off until an administrator turns it on", channelType)
+	}
+	assert.True(t, valid.channelTypeEnabled("D"))
+}
 
 func TestValidate_ChannelTypesAreConfigurable(t *testing.T) {
 	types := []model.ChannelType{
@@ -268,27 +503,34 @@ func TestValidate_ChannelTypesAreConfigurable(t *testing.T) {
 	}
 
 	for _, channelType := range types {
-		t.Run(string(channelType)+" enabled by default", func(t *testing.T) {
+		t.Run(string(channelType)+" allowed when configured", func(t *testing.T) {
 			p, api := setupTestPlugin(t)
+			p.configuration.EnabledChannelTypes = allChannelTypes
 			userID := validID("userTypes")
 			channelID := validID("chanTypes")
 			api.On("GetChannel", channelID).Return(&model.Channel{Id: channelID, Type: channelType}, nil)
 			api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
-			api.On("KVGet", idxKey(channelID)).Return(nil, nil)
 
 			w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID}), userID)
 			assert.Equal(t, http.StatusOK, w.Code)
 		})
 
-		t.Run(string(channelType)+" rejected when excluded", func(t *testing.T) {
+		t.Run(string(channelType)+" refused when excluded", func(t *testing.T) {
 			p, api := setupTestPlugin(t)
-			p.configuration.EnabledChannelTypes = normalizeChannelTypes(strings.ReplaceAll(defaultChannelTypes, string(channelType), ""))
+			excluded := normalizeChannelTypes(strings.ReplaceAll(allChannelTypes, string(channelType), ""))
+			require.NotEmpty(t, excluded)
+			p.configuration.EnabledChannelTypes = excluded
 			userID := validID("userTypes")
 			channelID := validID("chanTypes")
 			api.On("GetChannel", channelID).Return(&model.Channel{Id: channelID, Type: channelType}, nil)
 
 			w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID}), userID)
 			assert.Equal(t, http.StatusForbidden, w.Code)
+
+			post := &model.Post{Id: validID("postTypes"), UserId: validID("otherTypes"), ChannelId: channelID, CreateAt: 1000}
+			api.On("GetPost", post.Id).Return(post, nil)
+			assert.Equal(t, http.StatusForbidden, doRead(p, mustJSON(t, readRequest{PostID: post.Id}), userID).Code)
+			assert.Equal(t, http.StatusForbidden, doPostReaders(p, mustJSON(t, postReadersRequest{PostID: post.Id}), userID).Code)
 		})
 	}
 }
@@ -324,9 +566,11 @@ func newPostReadersFixture(t *testing.T, post *model.Post, channelType model.Cha
 	p, api := setupTestPlugin(t)
 	wireKV(api, kv)
 
+	p.configuration.EnabledChannelTypes = allChannelTypes
 	api.On("GetPost", post.Id).Return(post, nil)
 	api.On("GetChannel", post.ChannelId).Return(&model.Channel{Id: post.ChannelId, Type: channelType}, nil)
 	api.On("HasPermissionToChannel", mock.Anything, post.ChannelId, model.PermissionReadChannel).Return(true)
+	stubAllMembers(api, post.ChannelId)
 
 	return postReadersFixture{plugin: p, kv: kv, channelID: post.ChannelId, postID: post.Id, authorID: post.UserId}
 }
@@ -419,7 +663,8 @@ func TestHandlePostReaders_TruncatesReaderList(t *testing.T) {
 	var resp postReadersResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	assert.Len(t, resp.Readers, maxQueryReaders)
-	assert.True(t, resp.Truncated)
+	assert.True(t, resp.Truncated, "a capped list must say so rather than look complete")
+	assert.Equal(t, maxQueryReaders, resp.NextOffset, "the rest of the readers must stay reachable")
 }
 
 func TestHandlePostReaders_IndexReadFailureReturns500(t *testing.T) {
@@ -443,4 +688,97 @@ func TestHandlePostReaders_RejectsBadInput(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, doPostReaders(p, mustJSON(t, postReadersRequest{PostID: validID("postX")}), "").Code)
 	assert.Equal(t, http.StatusBadRequest, doPostReaders(p, []byte("{not json"), validID("userX")).Code)
 	assert.Equal(t, http.StatusBadRequest, doPostReaders(p, mustJSON(t, postReadersRequest{PostID: "short"}), validID("userX")).Code)
+}
+
+// --- Security: no read state of someone else's message -----------------------
+
+// The detail endpoint is the only way to learn *who* read a post, and it belongs
+// to the author alone — in every channel type, including the ones where every
+// member can see the message itself.
+func TestHandlePostReaders_MemberCannotLearnWhoReadAnotherAuthorsPost(t *testing.T) {
+	for _, channelType := range []model.ChannelType{model.ChannelTypeGroup, model.ChannelTypePrivate, model.ChannelTypeOpen} {
+		t.Run(string(channelType), func(t *testing.T) {
+			post := &model.Post{Id: validID("postAuthored"), UserId: validID("theAuthor"), ChannelId: validID("chanNosy"), CreateAt: 1000}
+			f := newPostReadersFixture(t, post, channelType)
+
+			readerID := validID("someReader")
+			f.kv.set(idxKey(f.channelID), mustJSON(t, []string{readerID}))
+			f.kv.set(rrKey(f.channelID, f.postID, readerID), mustJSON(t, int64(1500)))
+
+			w := doPostReaders(f.plugin, mustJSON(t, postReadersRequest{PostID: f.postID}), validID("nosyMember"))
+
+			require.Equal(t, http.StatusForbidden, w.Code)
+			assert.NotContains(t, w.Body.String(), readerID)
+		})
+	}
+}
+
+// The query endpoint must not become a side channel for the same question: a
+// member of the channel gets nothing about a post they did not write, and in
+// particular cannot recover another member's read position from the response.
+func TestHandleQuery_MemberCannotDeriveForeignReadState(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	p.configuration.EnabledChannelTypes = allChannelTypes
+
+	snooper := validID("snooper")
+	author := validID("otherAuthor")
+	readerB := validID("readerB")
+	readerC := validID("readerC")
+	channelID := validID("chanSnoop")
+	theirPost := &model.Post{Id: validID("theirPost"), UserId: author, ChannelId: channelID, CreateAt: 1000}
+
+	api.On("GetChannel", channelID).Return(&model.Channel{Id: channelID, Type: model.ChannelTypeOpen}, nil)
+	api.On("HasPermissionToChannel", snooper, channelID, model.PermissionReadChannel).Return(true)
+	stubChannelPosts(api, channelID, theirPost)
+	stubAllMembers(api, channelID)
+
+	kv.set(idxKey(channelID), mustJSON(t, []string{readerB, readerC}))
+	kv.set(wmKey(channelID, readerB), mustJSON(t, Watermark{PostID: theirPost.Id, CreateAt: 4000, ReadAt: 4100}))
+	kv.set(wmKey(channelID, readerC), mustJSON(t, Watermark{PostID: theirPost.Id, CreateAt: 6000, ReadAt: 6100}))
+
+	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{theirPost.Id}}), snooper)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	body := w.Body.String()
+	var resp queryResponse
+	require.NoError(t, json.Unmarshal([]byte(body), &resp))
+
+	assert.Empty(t, resp.Posts, "no status at all for a post the caller did not write")
+	for _, id := range []string{readerB, readerC} {
+		assert.NotContains(t, body, id, "reader identities must never reach a non-author")
+	}
+	for _, stamp := range []string{"4000", "4100", "6000", "6100"} {
+		assert.NotContains(t, body, stamp, "read positions must never reach a non-author")
+	}
+}
+
+// A post the caller really did write, in a channel they really are in, is the one
+// case that must keep working.
+func TestHandleQuery_AuthorSeesTheStatusOfTheirOwnPost(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	p.configuration.EnabledChannelTypes = allChannelTypes
+
+	author := validID("realAuthor")
+	readerID := validID("realReader")
+	channelID := validID("chanOwn")
+	post := &model.Post{Id: validID("ownPost"), UserId: author, ChannelId: channelID, CreateAt: 1000}
+
+	api.On("GetChannel", channelID).Return(&model.Channel{Id: channelID, Type: model.ChannelTypePrivate}, nil)
+	api.On("HasPermissionToChannel", author, channelID, model.PermissionReadChannel).Return(true)
+	stubChannelPosts(api, channelID, post)
+	stubAllMembers(api, channelID)
+
+	kv.set(idxKey(channelID), mustJSON(t, []string{readerID}))
+	kv.set(wmKey(channelID, readerID), mustJSON(t, Watermark{PostID: post.Id, CreateAt: 3000, ReadAt: 3100}))
+
+	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{post.Id}}), author)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp queryResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, 1, resp.Posts[post.Id].Count)
 }
