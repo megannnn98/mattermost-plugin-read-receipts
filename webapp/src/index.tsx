@@ -1,11 +1,11 @@
 import {isDesktopClient} from './desktop';
 import {reducer} from './reducer';
-import {handleWebSocketEvent, WS_EVENT} from './websocket';
+import {handleReceiptsChangedEvent, handleWebSocketEvent, WS_EVENT, WS_RECEIPTS_CHANGED_EVENT} from './websocket';
 import {PLUGIN_ID} from './client';
 import ReadReceipt from './components/read_receipt';
 import {setStore} from './store_ref';
 import {ChannelWatcher, startChannelWatcher} from './channel_watcher';
-import {resetDeduplicator} from './actions';
+import {invalidatePluginConfigRequests, loadPluginConfig, resetDeduplicator} from './actions';
 import {resetVisibilityTracker} from './visibility';
 import {PluginRegistry, PluginStore} from './types';
 
@@ -29,16 +29,31 @@ export class ReadReceiptsPlugin {
         registry.registerReducer(reducer);
 
         registry.registerWebSocketEventHandler(WS_EVENT, (msg) => {
-            handleWebSocketEvent(msg, store);
+            handleWebSocketEvent(msg, store, () => this.watcher?.refreshSoon());
+        });
+        registry.registerWebSocketEventHandler(WS_RECEIPTS_CHANGED_EVENT, (msg) => {
+            handleReceiptsChangedEvent(msg, store, () => this.watcher?.refreshSoon());
         });
 
         registry.registerPostMessageAttachmentComponent(ReadReceipt);
 
         this.watcher = startChannelWatcher(store);
 
+        // Until the configuration lands the plugin stays inert: no indicator, no
+        // read report. Dispatching it wakes the watcher through its own store
+        // subscription, so nothing else needs to be scheduled here.
+        loadPluginConfig(store);
+
         if (typeof registry.registerReconnectHandler === 'function') {
             registry.registerReconnectHandler(() => {
-                this.watcher?.refresh();
+                // A reconnect is the point at which an administrator's change to
+                // the setting can have happened. Clear the previous allow-list
+                // first; only a successful fresh response may wake the watcher.
+                void loadPluginConfig(store).then((loaded) => {
+                    if (loaded) {
+                        this.watcher?.refresh();
+                    }
+                });
             });
         }
 
@@ -46,6 +61,7 @@ export class ReadReceiptsPlugin {
     }
 
     uninitialize(): void {
+        invalidatePluginConfigRequests();
         this.watcher?.stop();
         this.watcher = null;
         resetDeduplicator();

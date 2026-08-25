@@ -5,22 +5,61 @@
 
 // --- Redux state shapes -----------------------------------------------------
 
-export interface Watermark {
-    post_id: string;
-    create_at: number;
+/**
+ * Everything the sender is allowed to know about one of their own posts.
+ *
+ * `count` is how many people have read it and `truncated` says that number is a
+ * lower bound because the channel has more readers than one query covers. There
+ * are deliberately no reader identities here: the server does not send them, and
+ * the detailed list is fetched separately and only for the author.
+ */
+export interface PostStatus {
+    count: number;
+    truncated: boolean;
+    read_at: number | null;
+}
+
+export interface ReaderRead {
+    user_id: string;
     read_at: number;
+    exact: boolean;
+}
+
+export interface ReaderList {
+    list: ReaderRead[];
+    truncated: boolean;
+    nextOffset: number;
+}
+
+export interface PluginConfig {
+    enabled_channel_types: string;
 }
 
 export interface PluginState {
-    watermarks: Record<string, Watermark>;
-    receipts: Record<string, number>;
+    statuses: Record<string, PostStatus>;
+    readers: Record<string, ReaderList>;
+    // Bumped for a post whenever a websocket receipt invalidates its cached
+    // reader list. `loadPostReaders` tags its dispatch with the epoch it started
+    // from, and the reducer drops a page whose epoch is behind this — so a stale
+    // in-flight response cannot overwrite the fresh list, only the WS event can.
+    readersEpoch: Record<string, number>;
+    profiles: Record<string, MMUserProfile>;
+    // Bumped whenever `profiles` changes. Components select this instead of the
+    // profile map so that a profile arriving after a popover is already open
+    // re-renders it, without anything subscribing to the whole store.
+    profilesRevision: number;
+    config: PluginConfig | null;
 }
 
 export interface MMPost {
     id: string;
     user_id: string;
     channel_id: string;
+    root_id?: string;
     create_at: number;
+    update_at?: number;
+    edit_at?: number;
+    pending_post_id?: string;
     delete_at?: number;
     state?: string;
 }
@@ -31,6 +70,10 @@ export interface MMChannel {
 }
 
 export interface MMUserProfile {
+    id?: string;
+    username?: string;
+    first_name?: string;
+    last_name?: string;
     locale?: string;
 }
 

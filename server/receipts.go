@@ -45,7 +45,174 @@ func rrKey(channelID, postID, readerID string) string {
 // under the new `rr_<channelID>_<postID>_<readerID>` scheme and expire on their own within
 // ReceiptRetentionDays. The `wm_*` key format is unchanged.
 
-const maxWatermarkCASRetries = 5
+const (
+	maxWatermarkCASRetries = 5
+	// The index CAS loop needs a far larger bound than the watermark one. A
+	// watermark loser usually exits immediately on the re-read ("already covered"),
+	// so contention resolves itself; every first-time reader of a channel, by
+	// contrast, *must* land an append, so the number of retries a writer needs
+	// scales with the number of concurrent first readers, not with a constant.
+	// At 5 retries a burst of readers entering a busy channel silently lost
+	// entries — and a lost entry means that reader's receipts stay invisible
+	// until they happen to read again.
+	maxIndexCASRetries = 64
+	maxIndexReaders    = 1000
+	maxQueryReaders    = 200
+)
+
+func idxKey(channelID string) string {
+	return fmt.Sprintf("%s%s", kvPrefixIDX, channelID)
+}
+
+func (p *Plugin) getReaderIndex(channelID string) ([]string, []byte, error) {
+	data, appErr := p.API.KVGet(idxKey(channelID))
+	if appErr != nil {
+		return nil, nil, fmt.Errorf("kv get reader index: %s", appErr.Error())
+	}
+	if data == nil {
+		return nil, nil, nil
+	}
+	var readers []string
+	if err := json.Unmarshal(data, &readers); err != nil {
+		return nil, data, fmt.Errorf("unmarshal reader index: %w", err)
+	}
+	return readers, data, nil
+}
+
+// currentMembers keeps only those ids that are still members of the channel. The
+// reader index is append-only and has no TTL, so it accumulates people who have
+// since left; reporting their reads would both leak activity of someone the
+// requester no longer shares a channel with and let departed users fill the
+// index until live readers stop being counted.
+func (p *Plugin) currentMembers(channelID string, ids []string) (map[string]struct{}, error) {
+	present := make(map[string]struct{}, len(ids))
+	if len(ids) == 0 {
+		return present, nil
+	}
+	members, appErr := p.API.GetChannelMembersByIds(channelID, ids)
+	if appErr != nil {
+		return nil, fmt.Errorf("get channel members by ids: %s", appErr.Error())
+	}
+	for _, member := range members {
+		present[member.UserId] = struct{}{}
+	}
+	return present, nil
+}
+
+// readerPage is one bounded window over a channel's readers.
+type readerPage struct {
+	ids []string
+	// truncated reports that the index holds readers past this window, so any
+	// count derived from it is a lower bound and must be shown as one.
+	truncated bool
+	// nextOffset is where a follow-up page starts, or 0 when the index is
+	// exhausted.
+	nextOffset int
+}
+
+// channelReaders returns one page of the channel's readers, excluding the caller
+// and anyone who has left the channel. Cost is bounded to maxQueryReaders KV
+// reads plus a single membership lookup, no matter how large the channel is.
+func (p *Plugin) channelReaders(channelID, excludeID string, offset int) (readerPage, error) {
+	index, _, err := p.getReaderIndex(channelID)
+	if err != nil {
+		return readerPage{}, err
+	}
+
+	candidates := make([]string, 0, maxQueryReaders)
+	seen := 0
+	truncated := false
+	consumed := offset
+	for i := offset; i < len(index); i++ {
+		if index[i] == excludeID {
+			consumed = i + 1
+			continue
+		}
+		if seen == maxQueryReaders {
+			truncated = true
+			break
+		}
+		candidates = append(candidates, index[i])
+		seen++
+		consumed = i + 1
+	}
+
+	members, err := p.currentMembers(channelID, candidates)
+	if err != nil {
+		return readerPage{}, err
+	}
+	page := readerPage{ids: make([]string, 0, len(candidates)), truncated: truncated}
+	for _, readerID := range candidates {
+		if _, ok := members[readerID]; ok {
+			page.ids = append(page.ids, readerID)
+		}
+	}
+	if truncated {
+		page.nextOffset = consumed
+	}
+	return page, nil
+}
+
+// pruneReaderIndex drops readers who have left the channel. It runs only when the
+// index is full, so the membership lookup it costs is a rare event rather than
+// something every read pays for.
+func (p *Plugin) pruneReaderIndex(channelID string, readers []string) ([]string, error) {
+	members, err := p.currentMembers(channelID, readers)
+	if err != nil {
+		return nil, err
+	}
+	kept := make([]string, 0, len(readers))
+	for _, readerID := range readers {
+		if _, ok := members[readerID]; ok {
+			kept = append(kept, readerID)
+		}
+	}
+	return kept, nil
+}
+
+// ensureReaderIndexed reports whether this call added readerID to the index.
+// Callers need that fact because adding a legacy reader with an existing
+// watermark immediately changes aggregate counts, even if no watermark advances.
+func (p *Plugin) ensureReaderIndexed(channelID, readerID string) (bool, error) {
+	key := idxKey(channelID)
+	for attempt := 0; attempt < maxIndexCASRetries; attempt++ {
+		readers, raw, err := p.getReaderIndex(channelID)
+		if err != nil {
+			return false, err
+		}
+		for _, existing := range readers {
+			if existing == readerID {
+				return false, nil
+			}
+		}
+		if len(readers) >= maxIndexReaders {
+			pruned, err := p.pruneReaderIndex(channelID, readers)
+			if err != nil {
+				return false, err
+			}
+			if len(pruned) >= maxIndexReaders {
+				p.logWarn("reader index is full", "channel_id", channelID, "max_readers", maxIndexReaders)
+				return false, nil
+			}
+			readers = pruned
+		}
+		data, err := json.Marshal(append(readers, readerID))
+		if err != nil {
+			return false, fmt.Errorf("marshal reader index: %w", err)
+		}
+		ok, appErr := p.API.KVSetWithOptions(key, data, model.PluginKVSetOptions{Atomic: true, OldValue: raw})
+		if appErr != nil {
+			return false, fmt.Errorf("kv set reader index: %s", appErr.Error())
+		}
+		if ok {
+			return true, nil
+		}
+	}
+	// Exhaustion is reported, never swallowed: the caller turns it into a 500 and
+	// the client's backoff retries once the burst is over. Silently giving up
+	// would drop the reader from every future count.
+	return false, fmt.Errorf("reader index CAS failed after %d attempts", maxIndexCASRetries)
+}
 
 // getWatermarkRaw returns the parsed watermark AND the raw bytes that were read
 // from KV. The raw bytes are what OldValue for the CAS write must be — not the

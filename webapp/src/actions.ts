@@ -1,5 +1,6 @@
-import {PLUGIN_ID, fetchChannelReceipts, reportRead} from './client';
+import {PLUGIN_ID, fetchChannelReceipts, fetchPluginConfig, fetchPostReaders, fetchUsersByIds, reportRead, RequestError} from './client';
 import {ACTION_TYPES} from './reducer';
+import {selectReadersEpoch} from './selectors';
 import {PluginStore} from './types';
 
 class ReadDeduplicator {
@@ -41,6 +42,7 @@ class ReadDeduplicator {
 }
 
 let globalDeduplicator: ReadDeduplicator | null = null;
+let configRequestGeneration = 0;
 
 export function getDeduplicator(): ReadDeduplicator {
     if (!globalDeduplicator) {
@@ -54,6 +56,13 @@ export function resetDeduplicator(): void {
         globalDeduplicator.resetAll();
         globalDeduplicator = null;
     }
+}
+
+// Config requests may overlap across startup and reconnect. Advancing this
+// generation makes every earlier response inert, including one that resolves
+// after the plugin has been torn down.
+export function invalidatePluginConfigRequests(): void {
+    configRequestGeneration += 1;
 }
 
 export async function loadChannelReceipts(
@@ -71,12 +80,15 @@ export async function loadChannelReceipts(
             type: ACTION_TYPES.RECEIPTS_QUERY,
             data: {
                 channelId,
-                watermark: response.watermark,
-                receipts: response.receipts,
+                posts: response.posts,
+                truncated: response.truncated,
             },
         });
         return true;
     } catch (error) {
+        if ((error as RequestError).status === 403) {
+            return true;
+        }
         console.error(`[${PLUGIN_ID}] Failed to load receipts:`, error);
         return false;
     }
@@ -97,7 +109,78 @@ export async function sendReadReceipt(
         dedup.markSent(channelId, postId, createAt);
         return true;
     } catch (error) {
+        if ((error as RequestError).status === 403) {
+            dedup.markSent(channelId, postId, createAt);
+            return true;
+        }
         console.error(`[${PLUGIN_ID}] Failed to send read receipt:`, error);
+        return false;
+    }
+}
+
+/**
+ * Loads one page of the reader list of a post, plus the profiles needed to name
+ * the people in it. `offset` continues a truncated list rather than restarting it.
+ *
+ * The reader-list epoch is captured *before* the request goes out and carried on
+ * the dispatch. If a websocket receipt invalidates this post while the request is
+ * in flight, the reducer bumps the epoch and drops this now-stale page, so it can
+ * never overwrite a fresher list.
+ */
+export async function loadPostReaders(store: PluginStore, postId: string, offset = 0): Promise<void> {
+    const epoch = selectReadersEpoch(store.getState(), postId);
+    const response = await fetchPostReaders(postId, offset);
+    store.dispatch({
+        type: ACTION_TYPES.POST_READERS,
+        data: {
+            postId,
+            readers: response.readers,
+            truncated: response.truncated,
+            nextOffset: response.next_offset ?? 0,
+            append: offset > 0,
+            epoch,
+        },
+    });
+
+    const state = store.getState();
+    const pluginBranch = state[`plugins-${PLUGIN_ID}`] as {profiles?: Record<string, unknown>} | undefined;
+    const known = {
+        ...(state.entities?.users?.profiles ?? {}),
+        ...(pluginBranch?.profiles ?? {}),
+    };
+    const missing = response.readers.map((reader) => reader.user_id).filter((userId) => !known[userId]);
+    if (missing.length === 0) {
+        return;
+    }
+    const profiles = await fetchUsersByIds(missing);
+    store.dispatch({
+        type: ACTION_TYPES.PROFILES,
+        data: {profiles: Object.fromEntries(profiles.map((profile) => [profile.id, profile]))},
+    });
+}
+
+/**
+ * Loads the channel types the server collects receipts for. Until this lands the
+ * plugin stays inert, so a type an administrator disabled never gets an indicator
+ * or a read report — rather than being discovered from a 403 after the fact.
+ */
+export async function loadPluginConfig(store: PluginStore): Promise<boolean> {
+    const generation = ++configRequestGeneration;
+    // Reconnect must fail closed: a cached allow-list may have been disabled by
+    // an administrator while the websocket was down.
+    store.dispatch({type: ACTION_TYPES.CONFIG_LOADING});
+    try {
+        const config = await fetchPluginConfig();
+        if (generation !== configRequestGeneration) {
+            return false;
+        }
+        store.dispatch({type: ACTION_TYPES.CONFIG, data: {config}});
+        return true;
+    } catch (error) {
+        if (generation !== configRequestGeneration) {
+            return false;
+        }
+        console.error(`[${PLUGIN_ID}] Failed to load plugin configuration:`, error);
         return false;
     }
 }

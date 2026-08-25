@@ -1,12 +1,17 @@
-import React, {useEffect, useRef} from 'react';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
+import {createPortal} from 'react-dom';
 
-import {sendReadReceipt} from '../actions';
+import {loadPostReaders, sendReadReceipt} from '../actions';
+import {PLUGIN_ID} from '../client';
 import {getStore} from '../store_ref';
 import {getVisibilityTracker, VisibilityState} from '../visibility';
 import {formatReadTime, getLocaleFromState, t, SupportedLocale} from '../i18n';
 import {usePluginSelector} from '../hooks';
 import {getPostContext, shouldReportRead} from '../gating';
-import {selectPostReadAt} from '../selectors';
+import {selectPostReaders, selectPostStatus, selectProfilesRevision, selectReaderProfile, selectReadersEpoch} from '../selectors';
+import {createInlineMount, InlineMount, observeMountRemoval, resolvePostBody} from '../inline_mount';
+import {ReadersPopover, ReadersStatus} from './readers_popover';
+import {StatusTicks} from './status_ticks';
 import {GlobalState} from '../types';
 import {
     isSufficientlyVisible,
@@ -26,24 +31,55 @@ const isOwnPost = (state: GlobalState, postId: string): boolean => {
     return post ? post.user_id === state?.entities?.users?.currentUserId : false;
 };
 
-const isDMChannel = (state: GlobalState, postId: string): boolean => {
+/**
+ * A post counts as delivered once the server has accepted it — which is exactly
+ * what the single checkmark means in the messengers this indicator is modelled
+ * on. Mattermost has no per-device delivery signal at all, and the server-side
+ * `MessageHasBeenPosted` hook fires on that same acceptance, so storing a
+ * "delivered" flag would spend a KV key per post to record what the client can
+ * already see: the post exists and is neither pending nor failed.
+ */
+const isDelivered = (state: GlobalState, postId: string): boolean => {
     const post = state?.entities?.posts?.posts?.[postId];
-    const channel = post && state?.entities?.channels?.channels?.[post.channel_id];
-    return channel?.type === 'D';
-};
-
-const selectReadAt = (state: GlobalState, postId: string): number | null => {
-    const ctx = getPostContext(state, postId);
-    if (!ctx || !ctx.isOwn) {
-        return null;
+    if (!post) {
+        return false;
     }
-    return selectPostReadAt(state, postId, ctx.createAt, ctx.channelId);
+    const pending = Boolean(post.pending_post_id) && post.pending_post_id === post.id;
+    return !pending && post.state !== 'FAILED';
 };
 
-const isEqualDisplay = (
-    a: {isOwn: boolean; isDM: boolean; readAt: number | null},
-    b: {isOwn: boolean; isDM: boolean; readAt: number | null},
-): boolean => a.isOwn === b.isOwn && a.isDM === b.isDM && a.readAt === b.readAt;
+type Display = {
+    isOwn: boolean;
+    isDM: boolean;
+    eligible: boolean;
+    isThreadReply: boolean;
+    delivered: boolean;
+    count: number;
+    truncated: boolean;
+    readAt: number | null;
+    readers: unknown;
+    // Bumped by the reducer when a websocket receipt invalidates this post's
+    // reader list. Selecting it makes a re-render (and the popover's reload
+    // effect) fire on invalidation even when no list was cached to begin with —
+    // the case where a stale in-flight page could otherwise win the race.
+    readersEpoch: number;
+    // Selected purely so that a profile arriving while the reader list is open
+    // re-renders it. The profile map itself is read during render.
+    profilesRevision: number;
+};
+
+const isEqualDisplay = (a: Display, b: Display): boolean =>
+    a.isOwn === b.isOwn &&
+    a.isDM === b.isDM &&
+    a.eligible === b.eligible &&
+    a.isThreadReply === b.isThreadReply &&
+    a.delivered === b.delivered &&
+    a.count === b.count &&
+    a.truncated === b.truncated &&
+    a.readAt === b.readAt &&
+    a.readers === b.readers &&
+    a.readersEpoch === b.readersEpoch &&
+    a.profilesRevision === b.profilesRevision;
 
 interface ReadReceiptProps {
     postId: string;
@@ -51,19 +87,73 @@ interface ReadReceiptProps {
 
 export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
     const sentinelRef = useRef<HTMLSpanElement>(null);
+    const mountRef = useRef<InlineMount | null>(null);
+    // A callback ref, not a plain one: the popover needs the anchor *during*
+    // render, and a plain ref read there is stale for one render after the
+    // portal is re-created — the click that opened the popover then rendered
+    // nothing at all. Storing the node in state guarantees a render with it.
+    const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
+    const anchorRef = useCallback((node: HTMLButtonElement | null) => setAnchor(node), []);
+    const [inlineTarget, setInlineTarget] = useState<HTMLElement | null>(null);
+    const [popoverOpen, setPopoverOpen] = useState(false);
+    const [readersFailed, setReadersFailed] = useState(false);
+    const [remounts, setRemounts] = useState(0);
 
     const store = getStore();
 
-    const {isOwn, isDM, readAt} = usePluginSelector(
+    const {isOwn, isDM, eligible, isThreadReply, delivered, count, truncated, readAt, readersEpoch} = usePluginSelector(
         store,
-        (state) => ({
-            isOwn: isOwnPost(state, postId),
-            isDM: isDMChannel(state, postId),
-            readAt: selectReadAt(state, postId),
-        }),
+        (state) => {
+            const context = getPostContext(state, postId);
+            const status = selectPostStatus(state, postId);
+            return {
+                isOwn: isOwnPost(state, postId),
+                isDM: Boolean(context?.isDM),
+                eligible: Boolean(context?.isEligibleChannel),
+                isThreadReply: Boolean(context?.isThreadReply),
+                delivered: isDelivered(state, postId),
+                count: status.count,
+                truncated: status.truncated,
+                readAt: status.read_at,
+                readers: selectPostReaders(state, postId),
+                readersEpoch: selectReadersEpoch(state, postId),
+                profilesRevision: selectProfilesRevision(state),
+            };
+        },
         isEqualDisplay,
     );
     const locale = usePluginSelector<SupportedLocale>(store, (state) => getLocaleFromState(state));
+
+    useEffect(() => {
+        if (!isOwn || !delivered || !sentinelRef.current) {
+            return undefined;
+        }
+        const body = resolvePostBody(sentinelRef.current);
+        const mount = createInlineMount(sentinelRef.current);
+        mountRef.current = mount;
+        setInlineTarget(mount?.target ?? null);
+
+        // React owns the message subtree and discards foreign children whenever it
+        // rebuilds it — an edit, a reaction, a formatting change. This component is
+        // a sibling of the message, so no render of ours is triggered by that; the
+        // observer is what notices, and remounting is what puts the indicator back.
+        const stopObserving = body ? observeMountRemoval(
+            body,
+            () => Boolean(mountRef.current?.target.isConnected),
+            () => setRemounts((n) => n + 1),
+        ) : () => undefined;
+
+        return () => {
+            stopObserving();
+            mount?.dispose();
+            mountRef.current = null;
+            setInlineTarget(null);
+        };
+        // `isOwn` matters as much as the rest: ownership is not known until the
+        // post is in the store, so an effect that skipped it would keep whatever
+        // it decided on the first render. `remounts` re-runs the mount after the
+        // observer saw our node go.
+    }, [isOwn, delivered, remounts]);
 
     useEffect(() => {
         let disposed = false;
@@ -205,13 +295,56 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
             clearRetry();
             sufficientlyVisible = false;
         };
-        // `isDM` is a dependency on purpose: while the channel entity is not in
+        // `eligible` is a dependency on purpose: while the channel entity is not in
         // the store yet the component renders nothing, so there is no sentinel
-        // for the observer to attach to. Re-running the effect once isDM flips
+        // for the observer to attach to. Re-running the effect once eligibility flips
         // to true is what actually binds the observer to the mounted sentinel.
-    }, [postId, store, isDM]);
+    }, [postId, store, eligible, isOwn]);
 
-    if (!isDM) {
+    const state = store?.getState();
+    const cachedReaders = state ? selectPostReaders(state, postId) : undefined;
+    const nameOf = (userId: string) => (state ? selectReaderProfile(state, userId) : undefined);
+
+    const loadReaders = (offset: number) => {
+        if (!store) {
+            return;
+        }
+        setReadersFailed(false);
+        loadPostReaders(store, postId, offset).catch((error) => {
+            console.error(`[${PLUGIN_ID}] Failed to load post readers:`, error);
+            setReadersFailed(true);
+        });
+    };
+    const openPopover = () => {
+        setPopoverOpen(true);
+    };
+
+    // Load the reader list while the popover is open. The popover's effect owns
+    // the open-and-reopen path so a live WS receipt — which invalidates the cached
+    // list and bumps the post's epoch (see reducer) — is applied to a popover that
+    // is already showing. Keying on `readersEpoch` re-fires the load even when no
+    // list was cached to begin with: that is the exact race where a stale in-flight
+    // response started before the WS could otherwise write the old list back. The
+    // old page is dropped by the reducer (epoch mismatch) while this load fetches
+    // afresh. Keying on `cachedReaders` stops the load once the list has landed and
+    // stops a failed load from looping (the deps stay unchanged on failure).
+    useEffect(() => {
+        if (!popoverOpen || !store) {
+            return;
+        }
+        if (!cachedReaders) {
+            loadReaders(0);
+        }
+        // `cachedReaders` and `readersEpoch` are the staleness signals; `postId`
+        // and `store` re-scope the effect when the component is reused for another
+        // post.
+    }, [postId, popoverOpen, cachedReaders, readersEpoch, store]);
+
+    // Thread replies are out of scope for this version. A reply lives in the same
+    // channel as its root, so tracking it would let a reply read in the sidebar
+    // advance the channel watermark and mark every older message read. Root posts
+    // still get an indicator wherever they are rendered, including the sidebar.
+    if (!eligible || isThreadReply) {
         return null;
     }
 
@@ -225,27 +358,117 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         );
     }
 
-    if (!readAt) {
+    if (!delivered) {
         return null;
     }
 
-    const time = formatReadTime(readAt, locale);
+    // The popover is rendered as soon as it is opened, before the readers arrive.
+    // Waiting for the data would leave a failed request with an open flag and no
+    // close handlers mounted — a popover that can never be dismissed.
+    let readersStatus: ReadersStatus = 'ready';
+    if (!cachedReaders) {
+        readersStatus = readersFailed ? 'error' : 'loading';
+    }
 
-    return (
-        <div
-            className='read-receipt-indicator'
-            title={t(locale, 'readAt', {time})}
-        >
-            <span
+    let indicator;
+    if (count === 0) {
+        // Accepted by the server, nobody has read it yet.
+        indicator = (
+            <span title={t(locale, 'delivered')}>
+                <StatusTicks
+                    status='delivered'
+                    label={t(locale, 'delivered')}
+                />
+            </span>
+        );
+    } else if (isDM) {
+        indicator = (
+            <span title={readAt === null ? t(locale, 'read') : t(locale, 'readAt', {time: formatReadTime(readAt, locale)})}>
+                <StatusTicks
+                    status='read'
+                    label={t(locale, 'read')}
+                />
+            </span>
+        );
+    } else {
+        indicator = (
+            <button
+                ref={anchorRef}
+                type='button'
+                onClick={openPopover}
+                aria-label={truncated ? t(locale, 'readCountAtLeastLabel', {count: String(count)}) : t(locale, 'readCount', {count: String(count)})}
+                // inline-flex, not per-child vertical-align: the wrapper collapses
+                // its line box to keep the post height, and aligning children
+                // against a collapsed line box drops the count like a subscript.
+                // The size is in px on purpose — Mattermost's root font-size is
+                // 10px, so `0.75rem` here is 7.5px and unreadable.
                 style={{
-                    color: 'var(--center-channel-color-rgb)',
-                    opacity: 0.56,
-                    fontSize: '0.75rem',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 3,
+                    verticalAlign: 'text-bottom',
+                    border: 0,
+                    background: 'none',
+                    padding: 0,
+                    color: 'inherit',
+                    cursor: 'pointer',
+                    lineHeight: 1,
                 }}
             >
-                {`✓✓ ${t(locale, 'read')} ${time}`}
+                <StatusTicks
+                    status='read'
+                    label={t(locale, 'read')}
+                />
+                {/* A truncated count is a lower bound, so it must not be printed
+                    as if it were the exact number of readers. */}
+                <span style={{fontSize: 11, color: 'var(--center-channel-color, #3f4350)', opacity: 0.72}}>
+                    {truncated ? t(locale, 'readCountAtLeast', {count: String(count)}) : String(count)}
+                </span>
+            </button>
+        );
+    }
+
+    const portal = (
+        <>
+            {/*
+              * `lineHeight: 0` is load-bearing, not cosmetic. A smaller font with
+              * a normal line-height still builds an inline box whose half-leading
+              * hangs below the paragraph's strut, and measuring a real client
+              * showed the post growing by 2px the moment the indicator appeared.
+              * A zero line-height collapses that box, so the line stays exactly
+              * as tall as the paragraph while the glyph still paints.
+              */}
+            <span
+                style={{
+                    opacity: 0.56,
+                    fontSize: '0.75rem',
+                    lineHeight: 0,
+                    marginLeft: 4,
+                    whiteSpace: 'nowrap',
+                    verticalAlign: 'baseline',
+                }}
+            >
+                {indicator}
             </span>
-        </div>
+            {popoverOpen && anchor && (
+                <ReadersPopover
+                    anchor={anchor}
+                    readers={cachedReaders?.list ?? []}
+                    status={readersStatus}
+                    truncated={cachedReaders?.truncated ?? false}
+                    nameOf={nameOf}
+                    locale={locale}
+                    onLoadMore={cachedReaders?.nextOffset ? () => loadReaders(cachedReaders.nextOffset) : undefined}
+                    onClose={() => setPopoverOpen(false)}
+                />
+            )}
+        </>
+    );
+
+    return (
+        <span ref={sentinelRef} style={{display: 'contents'}}>
+            {inlineTarget && createPortal(portal, inlineTarget)}
+        </span>
     );
 };
 

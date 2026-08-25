@@ -31,11 +31,14 @@ func TestMarkAsRead_WatermarkCreated(t *testing.T) {
 		Id:   channelID,
 		Type: model.ChannelTypeDirect,
 	}
+	api.On("KVGet", idxKey(channelID)).Return(nil, nil)
+	api.On("KVSetWithOptions", idxKey(channelID), mock.Anything, mock.Anything).Return(true, nil)
 
 	api.On("KVGet", wmKey(channelID, readerID)).Return(nil, nil)
 	api.On("KVSetWithOptions", wmKey(channelID, readerID), mock.Anything, mock.Anything).Return(true, nil)
 	api.On("KVSetWithOptions", rrKey(channelID, postID, readerID), mock.Anything, mock.Anything).Return(true, nil)
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
+	api.On("PublishWebSocketEvent", wsEventReceiptsChanged, mock.Anything, mock.Anything).Return()
 
 	receipt, err := p.markAsRead(readerID, post, channel)
 	require.NoError(t, err)
@@ -71,6 +74,8 @@ func TestMarkAsRead_WatermarkMonotonicity(t *testing.T) {
 		Id:   channelID,
 		Type: model.ChannelTypeDirect,
 	}
+	indexData, _ := json.Marshal([]string{readerID})
+	api.On("KVGet", idxKey(channelID)).Return(indexData, nil)
 
 	api.On("KVGet", wmKey(channelID, readerID)).Return(wmData, nil)
 	// The watermark already covers this post, so markAsRead reads the stored
@@ -78,6 +83,7 @@ func TestMarkAsRead_WatermarkMonotonicity(t *testing.T) {
 	api.On("KVGet", rrKey(channelID, oldPostID, readerID)).Return(nil, nil)
 
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
+	api.On("PublishWebSocketEvent", wsEventReceiptsChanged, mock.Anything, mock.Anything).Return()
 
 	receipt, err := p.markAsRead(readerID, oldPost, channel)
 	require.NoError(t, err)
@@ -120,6 +126,8 @@ func TestMarkAsRead_Idempotency(t *testing.T) {
 		Id:   channelID,
 		Type: model.ChannelTypeDirect,
 	}
+	indexData, _ := json.Marshal([]string{readerID})
+	api.On("KVGet", idxKey(channelID)).Return(indexData, nil)
 
 	api.On("KVGet", wmKey(channelID, readerID)).Return(wmData, nil)
 	api.On("KVSetWithOptions", rrKey(channelID, postID, readerID), mock.Anything, mock.Anything).Return(false, nil)
@@ -156,10 +164,13 @@ func TestHandleQuery_Success(t *testing.T) {
 
 	api.On("GetChannel", channelID).Return(channel, nil)
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
-	api.On("GetChannelMembers", channelID, 0, 2).Return(model.ChannelMembers{
-		{UserId: userID},
-		{UserId: otherUserID},
-	}, nil)
+	stubChannelPosts(api, channelID,
+		&model.Post{Id: postID1, UserId: userID, ChannelId: channelID, CreateAt: 1000},
+		&model.Post{Id: postID2, UserId: userID, ChannelId: channelID, CreateAt: 2000},
+	)
+	stubAllMembers(api, channelID)
+	indexData, _ := json.Marshal([]string{otherUserID})
+	api.On("KVGet", idxKey(channelID)).Return(indexData, nil)
 
 	wm := &Watermark{
 		PostID:   postID2,
@@ -191,18 +202,18 @@ func TestHandleQuery_Success(t *testing.T) {
 	err := json.NewDecoder(w.Body).Decode(&resp)
 	require.NoError(t, err)
 
-	require.NotNil(t, resp.Watermark)
-	assert.Equal(t, postID2, resp.Watermark.PostID)
-	assert.Equal(t, int64(2000), resp.Watermark.CreateAt)
-
-	require.NotNil(t, resp.Receipts)
-	assert.Equal(t, readAt1, resp.Receipts[postID1])
-	_, hasPost2 := resp.Receipts[postID2]
-	assert.False(t, hasPost2, "post2 should not have explicit receipt (covered by watermark)")
+	// The single reader's watermark covers both posts, and a single-reader channel
+	// still gets the exact time from the per-post receipt where one survives.
+	assert.Equal(t, 1, resp.Posts[postID1].Count)
+	assert.Equal(t, readAt1, resp.Posts[postID1].ReadAt)
+	assert.Equal(t, 1, resp.Posts[postID2].Count)
+	assert.Zero(t, resp.Posts[postID2].ReadAt, "post2 has no explicit receipt; it is only covered by the watermark")
+	assert.False(t, resp.Truncated)
 }
 
 func TestHandleQuery_NonDM(t *testing.T) {
 	p, api := setupTestPlugin(t)
+	p.configuration.EnabledChannelTypes = "D"
 
 	userID := "user1xabcdefghijklmnopqrst"
 	channelID := "channel1xabcdefghijklmnopq"

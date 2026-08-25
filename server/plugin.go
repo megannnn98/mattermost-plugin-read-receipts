@@ -11,9 +11,14 @@ import (
 const (
 	PluginID       = "com.integrasources.read-receipts"
 	wsEventReceipt = "read_receipt"
-	kvPrefixWM     = "wm_"
-	kvPrefixRR     = "rr_"
-	maxQueryIDs    = 200
+	// wsEventReceiptsChanged is deliberately channel-scoped and contains no
+	// reader or post identity. A watermark advance can cover many older posts,
+	// so clients must re-query their own statuses instead of guessing counts.
+	wsEventReceiptsChanged = "receipts_changed"
+	kvPrefixWM             = "wm_"
+	kvPrefixRR             = "rr_"
+	kvPrefixIDX            = "idx_"
+	maxQueryIDs            = 200
 )
 
 type Plugin struct {

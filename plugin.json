@@ -1,8 +1,8 @@
 {
     "id": "com.integrasources.read-receipts",
     "name": "Read Receipts",
-    "description": "Shows read receipts in 1:1 DM conversations on Mattermost Desktop.",
-    "version": "0.1.0",
+    "description": "Shows read receipts in direct, group, private and open Mattermost Desktop channels.",
+    "version": "0.2.0",
     "homepage_url": "https://github.com/megannnn98/mattermost-plugin-read-receipts",
     "support_url": "https://github.com/megannnn98/mattermost-plugin-read-receipts/issues",
     "icon_path": "assets/icon.svg",
@@ -37,6 +37,14 @@
                 "help_text": "How many days per-post read timestamps are stored (1…3650; values ≤ 0 fall back to 30). After expiry only the watermark (fact of reading) remains with approximate time.",
                 "default": 30,
                 "placeholder": "30"
+            },
+            {
+                "key": "EnabledChannelTypes",
+                "display_name": "Enabled channel types",
+                "type": "text",
+                "help_text": "Channel types to collect read receipts in: D (direct), G (group), P (private), O (open). The default is D only — enabling G, P or O starts collecting read receipts for everyone in those channels, so it is an explicit decision. Invalid characters are ignored; an empty value falls back to D.",
+                "default": "D",
+                "placeholder": "D"
             }
         ]
     }

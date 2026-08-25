@@ -49,5 +49,12 @@ jobs:
         with:
           node-version: 20
       - run: make clean
-      - run: make server PLUGIN_TARGETS=linux/amd64
-      - run: make webapp
+      - run: make dist PLUGIN_TARGETS=linux/amd64
+      - name: Smoke-check packaged plugin bundle
+        run: |
+          version="$(node -p "require('./plugin.json').version")"
+          bundle="dist/com.integrasources.read-receipts-${version}.tar.gz"
+          tar -tzf "$bundle" | grep -Fx 'com.integrasources.read-receipts/plugin.json'
+          tar -tzf "$bundle" | grep -Fx 'com.integrasources.read-receipts/assets/'
+          tar -tzf "$bundle" | grep -Fx 'com.integrasources.read-receipts/server/dist/plugin-linux-amd64'
+          tar -tzf "$bundle" | grep -Fx 'com.integrasources.read-receipts/webapp/dist/main.js'

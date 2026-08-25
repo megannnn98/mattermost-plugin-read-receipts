@@ -26,10 +26,17 @@ unit-тесты не ловят. Код готов и закоммичен, `mak
 
 ### Что это за плагин
 
-Mattermost-плагин: в личной переписке 1:1 отправитель видит `✓✓ Прочитано HH:MM` под своим
-сообщением, когда получатель его реально увидел. Работает **только в Mattermost Desktop**
-(в браузере плагин не регистрирует ни компонентов, ни обработчиков). Group DM, публичные и
-приватные каналы, mobile — вне scope.
+Mattermost-плагин: отправитель видит рядом со своим сообщением галочку прочтения, когда
+получатель его реально увидел. Работает **только в Mattermost Desktop** (в браузере плагин не
+регистрирует ни компонентов, ни обработчиков); mobile — вне scope.
+
+С версии 0.2.0:
+- индикатор рисуется **inline сразу после текста**, а не отдельной строкой под ним — высота поста
+  от него не меняется; серая `✓` — доставлено, зелёные `✓✓` — прочитано;
+- поддерживаются типы каналов **D, G, P, O** (настройка `EnabledChannelTypes`); в неличных
+  каналах индикатор показывает `✓✓ N`, а по клику — список «кто и когда»;
+- **по умолчанию включён только `D`** — остальные типы администратор включает явно;
+- треды вне scope: у ответов в треде индикатора нет и чтение не отправляется.
 
 Устройство (проверено по актуальному master `mattermost/mattermost`, не по памяти):
 
@@ -44,21 +51,29 @@ Mattermost-плагин: в личной переписке 1:1 отправит
 - **Detect Desktop** — `window.desktopAPI.getAppInfo()` (пакет `@mattermost/desktop-api`), плюс
   `onUserActivityUpdate` для idle. UA-хак не используется. Это не security boundary.
 - **Хранение** — KV плагина: монотонный watermark `wm_<channelID>_<readerID>` =
-  `{post_id, create_at, read_at}` (без TTL) + точное время `rr_<postID>_<readerID>` = `read_at`
-  с TTL `ReceiptRetentionDays` (по умолчанию 30 дней), запись first-write-wins через
-  `KVSetWithOptions{Atomic: true, OldValue: nil}`.
+  `{post_id, create_at, read_at}` (без TTL) + точное время `rr_<channelID>_<postID>_<readerID>` =
+  `read_at` с TTL `ReceiptRetentionDays` (по умолчанию 30 дней), запись first-write-wins через
+  `KVSetWithOptions{Atomic: true, OldValue: nil}`. Ключ `rr_*` включает канал, чтобы один и тот же
+  `post_id`, запрошенный из чужого канала, физически не сопоставился с чужим receipt; старые ключи
+  `rr_<postID>_<readerID>` (без канала) с TTL ещё существуют, но не читаются и истекают сами.
 - **Эндпоинты** — `POST /plugins/com.integrasources.read-receipts/api/v1/read` `{post_id}` и
   `POST /plugins/com.integrasources.read-receipts/api/v1/receipts/query`
   `{channel_id, post_ids[]}`; user_id всегда берётся из заголовка `Mattermost-User-Id`, из тела
   запроса — никогда.
 - **WS-событие** — `custom_com.integrasources.read-receipts_read_receipt`, broadcast адресный
-  (`WebsocketBroadcast{UserId: postAuthorID}`), публикуется только когда watermark продвинулся.
-- **Клиентский gating** («прочитано») — все условия сразу: Desktop, канал поста ==
-  `currentChannelId` и тип `D`, окно видимо и в фокусе, пользователь не idle, элемент виден
-  (`IntersectionObserver`, threshold 0.75), dwell ≥ 1000 мс; дедупликация локальным watermark'ом.
+  (`WebsocketBroadcast{UserId: postAuthorID}`), публикуется после успеха обеих записей (receipt и
+  watermark), если изменился хотя бы один из них (`written || advanced`) — повторный POST не шлёт
+  лишних событий.
+- **Клиентский gating** («прочитано») — все условия сразу: Desktop, тип канала поста входит в
+  серверный `EnabledChannelTypes` (`isEligibleChannel`), канал поста == `currentChannelId`, пост —
+  не свой, не удалён и не ответ в треде, окно видимо и в фокусе, пользователь не idle, элемент
+  виден (`IntersectionObserver`, threshold 0.75), dwell ≥ 1000 мс; повторная отправка гасится
+  локальным `ReadDeduplicator` (channelId + postId + create_at). Само число читателей для G/P/O
+  приходит от **сервера** (`/receipts/query`), а не считается на клиенте по watermark'ам.
 - **channel watcher** (`webapp/src/channel_watcher.ts`) — один запрос `/receipts/query` на
-  открытый DM (свои посты, максимум 200, новые первыми) плюс `registerReconnectHandler` →
-  перечитывание после обрыва WebSocket. Polling'а нет и не должно появиться.
+  открытый канал, для которого включён тип (свои посты, максимум 200, новые первыми) плюс
+  `registerReconnectHandler` → перечитывание после обрыва WebSocket. Polling'а нет и не должно
+  появиться.
 
 Подробности — в `README.md` репозитория (разделы Architecture, Test, Limitations,
 Dependencies on Mattermost Internals).
@@ -123,15 +138,27 @@ docker exec mm-rr mmctl --local plugin enable com.integrasources.read-receipts
 Токены A/B/C — `POST /api/v4/users/login` (заголовок ответа `Token`), DM-канал —
 `POST /api/v4/channels/direct`, сообщение от A — `POST /api/v4/posts`.
 
+Перед групповыми/публичными проверками включите нужные типы: по умолчанию включён только `D`,
+прочие (`G`, `P`, `O`) администратор включает через `EnabledChannelTypes` (иначе `read` вернёт 403).
+
 | Проверка | Ожидание |
 |---|---|
 | B → `/api/v1/read` для поста A | 200, `read_at` заполнен |
 | тот же запрос повторно | 200, дубликата в KV нет, WS повторно не публикуется |
-| A → `/api/v1/receipts/query` | `watermark` + `receipts[post_id]` |
+| A → `/api/v1/receipts/query` | `posts[post_id] = {count, truncated, read_at?}` |
 | B → `read` для более старого поста | watermark не откатывается назад |
 | C (не участник DM) → оба эндпоинта | 403 |
 | A (автор) → `read` на свой пост | 403 |
-| пост в публичном канале → `read` | 403 |
+| пост в публичном канале → `read` | 200 (тип O включён в `EnabledChannelTypes`) |
+| то же при `EnabledChannelTypes=D` | 403 |
+| групповой канал, читают B и C, A → `query` | `count = 2`, идентичностей читателей в ответе нет |
+| группа (K > 1) → `query` | `read_at` отсутствует: точные времена отдаёт `/receipts/post` |
+| B → `query` про пост автора A | 200, но `posts` пуст — статуса чужого поста нет |
+| B → `query`, в ответе нет ни id читателей, ни их read-позиций | обязательно |
+| A → `query` с post_id из другого канала | статуса нет |
+| A (автор) → `/api/v1/receipts/post` | список читателей с временем, `exact: true` |
+| B (не автор) → `/api/v1/receipts/post` | 403 |
+| удалённый пост → `/api/v1/receipts/post` | 404 |
 | без токена | 401 |
 | `post_ids` > 200 элементов | усечение, не ошибка |
 
@@ -155,13 +182,24 @@ XDG_CONFIG_HOME=/tmp/mm-desktop-b mattermost-desktop &   # fallback: --user-data
 
 1. A → B «test message»: у A индикатора нет.
 2. B открывает DM, окно активно, сообщение в видимой области → через ~1 с уходит receipt.
-3. У A **без reload** появляется `✓✓ Прочитано HH:MM`.
+3. У A сразу после отправки видна серая `✓` (доставлено), а после прочтения **без reload** она
+    становится зелёными `✓✓`; точное время — в тултипе.
+3a. **Высота поста не изменилась.** Замерить `document.querySelector('.post__body').getBoundingClientRect().height`
+    до и после появления галочки — числа должны совпасть. Это и есть исходная претензия заказчика.
 4. Перезапуск Desktop у A → статус на месте (проверка channel watcher'а).
 5. B открывает тот же DM в браузере → receipt не уходит: в логах плагина ничего, watermark не двинулся.
 6. Окно B не в фокусе (blur) → receipt не уходит до возврата фокуса.
 7. Три подряд идущих сообщения от A → индикатор виден у всех трёх (проверка выбора слота).
 8. Локаль A `ru` → «Прочитано», `en` → «Read».
 9. Сообщение, прочитанное в браузере, receipt не порождает; после этого чтение в Desktop — порождает.
+10. Групповой канал с A, B и C: по мере чтения у A индикатор идёт `✓✓ 1` → `✓✓ 2`; клик открывает
+    список с обоими читателями и временем. То же в приватном (P) и открытом (O) канале.
+11. Правка поста, добавление реакции и подгрузка эмбеда не убирают inline-узел индикатора
+    (если убирают — значит, рабочей должна остаться запасная стратегия с оверлеем).
+12. Поповер у поста внизу экрана раскрывается **вверх** и не уходит за границу окна; прокрутка
+    списка постов его закрывает.
+13. Уменьшить `ReceiptRetentionDays` до 1, дождаться истечения per-post receipt → список
+    читателей показывает время с пометкой `≈`.
 
 Шаги требуют кликов в GUI. Если агент не может управлять GUI — подготовить окружение, выполнить
 шаги 1–4 из раздела REST, а GUI-часть оформить как точный чеклист для человека и явно написать

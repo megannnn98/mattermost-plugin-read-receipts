@@ -3,78 +3,215 @@ import {PLUGIN_ID} from '../src/client';
 
 describe('reducer', () => {
     it('returns initial state', () => {
-        const state = reducer(undefined, {type: 'UNKNOWN'});
-        expect(state).toEqual({
-            watermarks: {},
-            receipts: {},
+        expect(reducer(undefined, {type: 'UNKNOWN'})).toEqual({
+            statuses: {},
+            readers: {},
+            readersEpoch: {},
+            profiles: {},
+            profilesRevision: 0,
+            config: null,
         });
     });
 
     it('action types include plugin ID prefix', () => {
         expect(ACTION_TYPES.RECEIPTS_QUERY).toBe(`${PLUGIN_ID}_RECEIPTS_QUERY`);
         expect(ACTION_TYPES.WS_RECEIPT).toBe(`${PLUGIN_ID}_WS_RECEIPT`);
+        expect(ACTION_TYPES.CONFIG).toBe(`${PLUGIN_ID}_CONFIG`);
     });
 
-    it('handles RECEIPTS_QUERY with watermark', () => {
+    it('stores the per-post status a query returned', () => {
         const state = reducer(undefined, {
             type: ACTION_TYPES.RECEIPTS_QUERY,
             data: {
                 channelId: 'ch1',
-                watermark: {
-                    post_id: 'p1',
-                    create_at: 1000,
-                    read_at: 2000,
+                posts: {p1: {count: 2, truncated: false, read_at: 4000}, p2: {count: 0, truncated: false}},
+            },
+        });
+
+        expect(state.statuses.p1).toEqual({count: 2, truncated: false, read_at: 4000});
+        expect(state.statuses.p2).toEqual({count: 0, truncated: false, read_at: null});
+    });
+
+    it('marks every post of a truncated channel as a lower bound', () => {
+        const state = reducer(undefined, {
+            type: ACTION_TYPES.RECEIPTS_QUERY,
+            data: {channelId: 'ch1', posts: {p1: {count: 200, truncated: false}}, truncated: true},
+        });
+
+        expect(state.statuses.p1.truncated).toBe(true);
+    });
+
+    describe('websocket receipts', () => {
+        it('takes a DM event as the whole truth', () => {
+            const state = reducer(undefined, {
+                type: ACTION_TYPES.WS_RECEIPT,
+                data: {channel_id: 'ch1', post_id: 'p1', read_at: 2000, reader_id: 'a', isDM: true},
+            });
+
+            expect(state.statuses.p1).toEqual({count: 1, truncated: false, read_at: 2000});
+        });
+
+        it('treats a group event as a floor, not as a count', () => {
+            const queried = reducer(undefined, {
+                type: ACTION_TYPES.RECEIPTS_QUERY,
+                data: {channelId: 'ch1', posts: {p1: {count: 5, truncated: false}}},
+            });
+            const after = reducer(queried, {
+                type: ACTION_TYPES.WS_RECEIPT,
+                data: {channel_id: 'ch1', post_id: 'p1', read_at: 9000, reader_id: 'b', isDM: false},
+            });
+
+            // The event proves somebody read it; it does not say how many people
+            // have, so a stale event must never walk an accurate count backwards.
+            expect(after.statuses.p1.count).toBe(5);
+            expect(after.statuses.p1.read_at).toBeNull();
+        });
+
+        it('raises an unknown post to at least one reader', () => {
+            const state = reducer(undefined, {
+                type: ACTION_TYPES.WS_RECEIPT,
+                data: {channel_id: 'ch1', post_id: 'p1', read_at: 9000, reader_id: 'b', isDM: false},
+            });
+            expect(state.statuses.p1.count).toBe(1);
+        });
+
+        it('invalidates a cached reader list so a fresh read is visible', () => {
+            const seeded = reducer(undefined, {
+                type: ACTION_TYPES.RECEIPTS_QUERY,
+                data: {channelId: 'ch1', posts: {p1: {count: 1, truncated: false, read_at: 1000}}},
+            });
+            const withList = reducer(seeded, {
+                type: ACTION_TYPES.POST_READERS,
+                data: {
+                    postId: 'p1',
+                    readers: [{user_id: 'a', read_at: 1000, exact: true}],
+                    truncated: false,
+                    nextOffset: 0,
+                    append: false,
+                    epoch: 0,
                 },
-                receipts: {p1: 2000},
-            },
+            });
+            const after = reducer(withList, {
+                type: ACTION_TYPES.WS_RECEIPT,
+                data: {channel_id: 'ch1', post_id: 'p1', read_at: 2000, reader_id: 'b', isDM: false},
+            });
+
+            // The event is a floor on the count, and the stale [a] list is dropped
+            // so the popover will re-fetch and include the new reader b. The epoch
+            // bump is what lets the popover re-fire and reject older pages.
+            expect(after.statuses.p1.count).toBe(1);
+            expect(after.readers.p1).toBeUndefined();
+            expect(after.readersEpoch.p1).toBe(1);
         });
 
-        expect(state.watermarks['ch1']).toEqual({
-            post_id: 'p1',
-            create_at: 1000,
-            read_at: 2000,
+        it('ignores an event without a post id', () => {
+            const before = reducer(undefined, {type: 'UNKNOWN'});
+            expect(reducer(before, {type: ACTION_TYPES.WS_RECEIPT, data: {reader_id: 'b'}})).toBe(before);
         });
-        expect(state.receipts['p1']).toBe(2000);
+
+        // Regression for the in-flight race: a request issued before the WS carried
+        // the old epoch; when it lands after the invalidation its stale page must be
+        // dropped, not written over the (fresh or still-missing) list.
+        it('drops a reader page issued against a stale epoch after a WS invalidation', () => {
+            const invalidated = reducer(undefined, {
+                type: ACTION_TYPES.WS_RECEIPT,
+                data: {channel_id: 'ch1', post_id: 'p1', read_at: 2000, reader_id: 'b', isDM: false},
+            });
+            expect(invalidated.readersEpoch.p1).toBe(1);
+
+            // The in-flight response for the pre-WS request (epoch 0) comes back late.
+            const stale = reducer(invalidated, {
+                type: ACTION_TYPES.POST_READERS,
+                data: {
+                    postId: 'p1',
+                    readers: [{user_id: 'a', read_at: 1000, exact: true}],
+                    truncated: false,
+                    nextOffset: 0,
+                    append: false,
+                    epoch: 0,
+                },
+            });
+
+            // Not accepted: the list stays absent so the popover still needs to load.
+            expect(stale.readers.p1).toBeUndefined();
+            expect(stale.readersEpoch.p1).toBe(1);
+
+            // A page for the current epoch lands normally.
+            const fresh = reducer(stale, {
+                type: ACTION_TYPES.POST_READERS,
+                data: {
+                    postId: 'p1',
+                    readers: [{user_id: 'a', read_at: 1000, exact: true}, {user_id: 'b', read_at: 2000, exact: true}],
+                    truncated: false,
+                    nextOffset: 0,
+                    append: false,
+                    epoch: 1,
+                },
+            });
+            expect(fresh.readers.p1.list.map((r) => r.user_id)).toEqual(['a', 'b']);
+        });
     });
 
-    it('enforces watermark monotonicity', () => {
-        let state = reducer(undefined, {
-            type: ACTION_TYPES.RECEIPTS_QUERY,
+    describe('reader lists', () => {
+        const page = (users: string[], truncated: boolean, nextOffset: number, append: boolean) => ({
+            type: ACTION_TYPES.POST_READERS,
             data: {
-                channelId: 'ch1',
-                watermark: {post_id: 'p1', create_at: 1000, read_at: 2000},
-                receipts: {},
+                postId: 'p1',
+                readers: users.map((user_id) => ({user_id, read_at: 1000, exact: true})),
+                truncated,
+                nextOffset,
+                append,
             },
         });
 
-        state = reducer(state, {
-            type: ACTION_TYPES.RECEIPTS_QUERY,
-            data: {
-                channelId: 'ch1',
-                watermark: {post_id: 'p2', create_at: 500, read_at: 1500},
-                receipts: {},
-            },
+        it('stores the first page', () => {
+            const state = reducer(undefined, page(['a', 'b'], true, 200, false));
+            expect(state.readers.p1.list.map((r) => r.user_id)).toEqual(['a', 'b']);
+            expect(state.readers.p1).toMatchObject({truncated: true, nextOffset: 200});
         });
 
-        expect(state.watermarks['ch1'].create_at).toBe(1000);
+        it('appends a continuation instead of replacing it', () => {
+            const first = reducer(undefined, page(['a'], true, 200, false));
+            const second = reducer(first, page(['b'], false, 0, true));
+            expect(second.readers.p1.list.map((r) => r.user_id)).toEqual(['a', 'b']);
+            expect(second.readers.p1).toMatchObject({truncated: false, nextOffset: 0});
+        });
+
+        it('replaces the list when the popover is reopened from the start', () => {
+            const first = reducer(undefined, page(['a', 'b'], false, 0, false));
+            const reopened = reducer(first, page(['a'], false, 0, false));
+            expect(reopened.readers.p1.list.map((r) => r.user_id)).toEqual(['a']);
+        });
     });
 
-    it('handles WS_RECEIPT event', () => {
+    it('bumps a revision when profiles arrive so an open list can re-render', () => {
         const state = reducer(undefined, {
-            type: ACTION_TYPES.WS_RECEIPT,
-            data: {
-                channel_id: 'ch1',
-                post_id: 'p1',
-                create_at: 1000,
-                read_at: 2000,
-            },
+            type: ACTION_TYPES.PROFILES,
+            data: {profiles: {a: {username: 'ada'}}},
         });
+        expect(state.profiles.a).toEqual({username: 'ada'});
+        expect(state.profilesRevision).toBe(1);
 
-        expect(state.watermarks['ch1']).toEqual({
-            post_id: 'p1',
-            create_at: 1000,
-            read_at: 2000,
+        const again = reducer(state, {type: ACTION_TYPES.PROFILES, data: {profiles: {b: {username: 'bob'}}}});
+        expect(again.profilesRevision).toBe(2);
+        expect(again.profiles).toEqual({a: {username: 'ada'}, b: {username: 'bob'}});
+    });
+
+    it('stores the plugin configuration', () => {
+        const state = reducer(undefined, {
+            type: ACTION_TYPES.CONFIG,
+            data: {config: {enabled_channel_types: 'DG'}},
         });
-        expect(state.receipts['p1']).toBe(2000);
+        expect(state.config).toEqual({enabled_channel_types: 'DG'});
+    });
+
+    it('forgets an old configuration while a reconnect refresh is pending', () => {
+        const configured = reducer(undefined, {
+            type: ACTION_TYPES.CONFIG,
+            data: {config: {enabled_channel_types: 'DG'}},
+        });
+        const loading = reducer(configured, {type: ACTION_TYPES.CONFIG_LOADING});
+
+        expect(loading.config).toBeNull();
     });
 });

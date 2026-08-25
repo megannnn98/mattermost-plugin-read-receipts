@@ -1,16 +1,30 @@
 import {loadChannelReceipts} from './actions';
+import {isChannelTypeEnabled, selectEnabledChannelTypes} from './selectors';
 import {GlobalState, PluginStore} from './types';
 
 export const MAX_QUERY_IDS = 200;
 export const RETRY_BASE_MS = 5000;
 export const RETRY_MAX_MS = 60000;
+// A burst of readers opening a channel produces a burst of websocket receipts.
+// Each one only proves "somebody read it"; the count comes from the server, so
+// the events are coalesced into a single re-query instead of one per event.
+export const REFRESH_DEBOUNCE_MS = 1500;
 
-export function isDirectChannel(state: GlobalState, channelId: string): boolean | null {
+/**
+ * Whether receipts are collected in this channel, or null while that is not yet
+ * decidable — the channel entity has not loaded, or the plugin configuration has
+ * not arrived. Null means "wait", never "no": guessing here would either report
+ * reads the server is about to refuse or skip a channel permanently.
+ */
+export function isEligibleChannel(state: GlobalState, channelId: string): boolean | null {
     const channel = state?.entities?.channels?.channels?.[channelId];
     if (!channel) {
         return null;
     }
-    return channel.type === 'D';
+    if (selectEnabledChannelTypes(state) === null) {
+        return null;
+    }
+    return isChannelTypeEnabled(state, channel.type);
 }
 
 /**
@@ -37,7 +51,7 @@ export function collectOwnPostIds(state: GlobalState, channelId: string, limit: 
     for (const block of blocks) {
         for (const postId of block?.order ?? []) {
             const post = posts[postId];
-            if (!post || post.user_id !== currentUserId || post.delete_at) {
+            if (!post || post.user_id !== currentUserId || post.delete_at || post.root_id) {
                 continue;
             }
             own.set(postId, post.create_at);
@@ -53,6 +67,7 @@ export function collectOwnPostIds(state: GlobalState, channelId: string, limit: 
 export interface ChannelWatcher {
     stop: () => void;
     refresh: () => void;
+    refreshSoon: () => void;
     check: () => void;
 }
 
@@ -68,6 +83,7 @@ export function startChannelWatcher(store: PluginStore): ChannelWatcher {
     let retryChannelId: string | null = null;
     let failures = 0;
     let stopped = false;
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
     const clearRetry = () => {
         if (retryTimer) {
@@ -96,12 +112,12 @@ export function startChannelWatcher(store: PluginStore): ChannelWatcher {
             return;
         }
 
-        const isDM = isDirectChannel(state, channelId);
-        if (isDM === null) {
+        const eligible = isEligibleChannel(state, channelId);
+        if (eligible === null) {
             // Channel entity not loaded yet — retry on a later store update.
             return;
         }
-        if (!isDM) {
+        if (!eligible) {
             handledChannelId = channelId;
             return;
         }
@@ -149,26 +165,41 @@ export function startChannelWatcher(store: PluginStore): ChannelWatcher {
     const unsubscribe = store.subscribe(check);
     check();
 
+    const refresh = () => {
+        // If a query is in flight, mark that the current channel must be
+        // reloaded once it finishes (its done() re-checks unconditionally).
+        // If idle, resetting handledChannelId below is enough to trigger a
+        // fresh load.
+        if (inFlightChannelId !== null) {
+            refreshRequested = true;
+        }
+        // A reconnect is exactly the event a backed-off channel was waiting
+        // for: drop the pending backoff instead of sitting it out.
+        clearRetry();
+        failures = 0;
+        handledChannelId = null;
+        check();
+    };
+
     return {
         stop: () => {
             stopped = true;
             clearRetry();
+            if (debounceTimer) {
+                clearTimeout(debounceTimer);
+                debounceTimer = null;
+            }
             unsubscribe();
         },
-        refresh: () => {
-            // If a query is in flight, mark that the current channel must be
-            // reloaded once it finishes (its done() re-checks unconditionally).
-            // If idle, resetting handledChannelId below is enough to trigger a
-            // fresh load.
-            if (inFlightChannelId !== null) {
-                refreshRequested = true;
+        refresh,
+        refreshSoon: () => {
+            if (stopped || debounceTimer) {
+                return;
             }
-            // A reconnect is exactly the event a backed-off channel was waiting
-            // for: drop the pending backoff instead of sitting it out.
-            clearRetry();
-            failures = 0;
-            handledChannelId = null;
-            check();
+            debounceTimer = setTimeout(() => {
+                debounceTimer = null;
+                refresh();
+            }, REFRESH_DEBOUNCE_MS);
         },
         check,
     };

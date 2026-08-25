@@ -76,10 +76,9 @@ func TestHandleQuery_CrossChannelIsolation(t *testing.T) {
 	channel := &model.Channel{Id: channelA, Type: model.ChannelTypeDirect}
 	api.On("GetChannel", channelA).Return(channel, nil)
 	api.On("HasPermissionToChannel", userID, channelA, model.PermissionReadChannel).Return(true)
-	api.On("GetChannelMembers", channelA, 0, 2).Return(model.ChannelMembers{
-		{UserId: userID},
-		{UserId: otherID},
-	}, nil)
+	stubChannelPosts(api, channelA)
+	stubAllMembers(api, channelA)
+	kv.set(idxKey(channelA), mustJSON(t, []string{otherID}))
 
 	// The requester asks for a post from DM B while querying DM A.
 	body := mustJSON(t, queryRequest{ChannelID: channelA, PostIDs: []string{postSomewhereElse}})
@@ -88,7 +87,7 @@ func TestHandleQuery_CrossChannelIsolation(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	var resp queryResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	assert.Empty(t, resp.Receipts, "a post from another channel must not leak a receipt")
+	assert.Empty(t, resp.Posts, "a post from another channel must not leak a receipt")
 }
 
 // --- Monotonic watermark under concurrency ---------------------------------
@@ -145,10 +144,13 @@ func TestHandleQuery_ReceiptReadFailureReturns500WithoutPartialResponse(t *testi
 	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
 	api.On("GetChannel", channelID).Return(channel, nil)
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
-	api.On("GetChannelMembers", channelID, 0, 2).Return(model.ChannelMembers{
-		{UserId: userID},
-		{UserId: otherID},
-	}, nil)
+	stubChannelPosts(api, channelID,
+		&model.Post{Id: firstPostID, UserId: userID, ChannelId: channelID, CreateAt: 1000},
+		&model.Post{Id: failingPostID, UserId: userID, ChannelId: channelID, CreateAt: 1000},
+	)
+	stubAllMembers(api, channelID)
+	kv.set(idxKey(channelID), mustJSON(t, []string{otherID}))
+	kv.set(wmKey(channelID, otherID), mustJSON(t, Watermark{PostID: firstPostID, CreateAt: 5000, ReadAt: 5000}))
 
 	kv.set(rrKey(channelID, firstPostID, otherID), mustJSON(t, int64(1000)))
 	kv.failGet = func(key string) *model.AppError {
@@ -178,10 +180,10 @@ func TestHandleQuery_WatermarkReadFailureReturns500(t *testing.T) {
 	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
 	api.On("GetChannel", channelID).Return(channel, nil)
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
-	api.On("GetChannelMembers", channelID, 0, 2).Return(model.ChannelMembers{
-		{UserId: userID},
-		{UserId: otherID},
-	}, nil)
+	ownPost := validID("ownWatermarkPost")
+	stubChannelPosts(api, channelID, &model.Post{Id: ownPost, UserId: userID, ChannelId: channelID, CreateAt: 1000})
+	stubAllMembers(api, channelID)
+	kv.set(idxKey(channelID), mustJSON(t, []string{otherID}))
 
 	kv.failGet = func(key string) *model.AppError {
 		if key == wmKey(channelID, otherID) {
@@ -190,7 +192,7 @@ func TestHandleQuery_WatermarkReadFailureReturns500(t *testing.T) {
 		return nil
 	}
 
-	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID}), userID)
+	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{ownPost}}), userID)
 	require.Equal(t, http.StatusInternalServerError, w.Code)
 }
 
@@ -206,17 +208,16 @@ func TestHandleQuery_MissingReceiptReturns200(t *testing.T) {
 	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
 	api.On("GetChannel", channelID).Return(channel, nil)
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
-	api.On("GetChannelMembers", channelID, 0, 2).Return(model.ChannelMembers{
-		{UserId: userID},
-		{UserId: otherID},
-	}, nil)
+	stubChannelPosts(api, channelID, &model.Post{Id: postID, UserId: userID, ChannelId: channelID, CreateAt: 1000})
+	stubAllMembers(api, channelID)
+	kv.set(idxKey(channelID), mustJSON(t, []string{otherID}))
 
 	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{postID}}), userID)
 
 	require.Equal(t, http.StatusOK, w.Code)
 	var response queryResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&response))
-	assert.Empty(t, response.Receipts)
+	assert.Zero(t, response.Posts[postID].Count, "nobody has read it, so the status is an empty one")
 }
 
 func TestMarkAsRead_WatermarkKeepsFirstReceiptTimeAfterRetry(t *testing.T) {
@@ -224,6 +225,7 @@ func TestMarkAsRead_WatermarkKeepsFirstReceiptTimeAfterRetry(t *testing.T) {
 	p, api := setupTestPlugin(t)
 	wireKV(api, kv)
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
+	api.On("PublishWebSocketEvent", wsEventReceiptsChanged, mock.Anything, mock.Anything).Return()
 
 	readerID := validID("readerRetry")
 	channelID := validID("channelRetry")
@@ -271,6 +273,7 @@ func TestMarkAsRead_ReceiptWriteFailureLeavesWatermarkUntouched(t *testing.T) {
 	// not be reached); register a KVGet impl so plugintest does not panic if code
 	// unexpectedly reads.
 	api.On("KVGet", mock.Anything).Return(nil, nil)
+	api.On("KVSetWithOptions", idxKey(channelID), mock.Anything, mock.Anything).Return(true, nil)
 
 	_, err := p.markAsRead(readerID, post, channel)
 	require.Error(t, err)
@@ -294,6 +297,7 @@ func TestHandleRead_ReceiptWriteFailureReturns500(t *testing.T) {
 	api.On("GetChannel", channelID).Return(channel, nil)
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
 	api.On("KVGet", mock.Anything).Return(nil, nil)
+	api.On("KVSetWithOptions", idxKey(channelID), mock.Anything, mock.Anything).Return(true, nil)
 	api.On("KVSetWithOptions", rrKey(channelID, postID, userID), mock.Anything, mock.Anything).Return(false, model.NewAppError("kv", "boom", nil, "", http.StatusInternalServerError))
 
 	w := doRead(p, mustJSON(t, readRequest{PostID: postID}), userID)
@@ -317,6 +321,7 @@ func TestHandleRead_WatermarkCASFailureReturns500WithoutWS(t *testing.T) {
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
 	// Receipt write succeeds; watermark CAS always loses (conflict) -> exhausted.
 	api.On("KVGet", mock.Anything).Return(nil, nil)
+	api.On("KVSetWithOptions", idxKey(channelID), mock.Anything, mock.Anything).Return(true, nil)
 	api.On("KVSetWithOptions", rrKey(channelID, postID, userID), mock.Anything, mock.Anything).Return(true, nil)
 	api.On("KVSetWithOptions", wmKey(channelID, userID), mock.Anything, mock.Anything).Return(false, nil)
 
@@ -336,27 +341,30 @@ func TestHandleQuery_MaxLimitOnlyFirst200(t *testing.T) {
 	otherID := validID("userB")
 	channelID := validID("chanQ")
 
+	posts := make([]*model.Post, 0, maxQueryIDs+50)
+	ids := make([]string, 0, maxQueryIDs+50)
 	for i := 0; i < maxQueryIDs+50; i++ {
-		kv.set(rrKey(channelID, validID(fmt.Sprintf("post%03d", i)), otherID), mustJSON(t, int64(1000+i)))
+		postID := validID(fmt.Sprintf("post%03d", i))
+		ids = append(ids, postID)
+		posts = append(posts, &model.Post{Id: postID, UserId: userID, ChannelId: channelID, CreateAt: 1000})
 	}
+	kv.set(idxKey(channelID), mustJSON(t, []string{otherID}))
+	kv.set(wmKey(channelID, otherID), mustJSON(t, Watermark{PostID: ids[0], CreateAt: 9000, ReadAt: 9000}))
 
 	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
 	api.On("GetChannel", channelID).Return(channel, nil)
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
-	api.On("GetChannelMembers", channelID, 0, 2).Return(model.ChannelMembers{{UserId: userID}, {UserId: otherID}}, nil)
+	stubChannelPosts(api, channelID, posts...)
+	stubAllMembers(api, channelID)
 
-	ids := make([]string, 0, maxQueryIDs+50)
-	for i := 0; i < maxQueryIDs+50; i++ {
-		ids = append(ids, validID(fmt.Sprintf("post%03d", i)))
-	}
 	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: ids}), userID)
 	require.Equal(t, http.StatusOK, w.Code)
 
 	var resp queryResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	assert.Len(t, resp.Receipts, maxQueryIDs, "only the first 200 ids may be queried")
+	assert.Len(t, resp.Posts, maxQueryIDs, "only the first 200 ids may be queried")
 	// The 201st+ post must not be present.
-	_, ok := resp.Receipts[validID(fmt.Sprintf("post%03d", maxQueryIDs))]
+	_, ok := resp.Posts[validID(fmt.Sprintf("post%03d", maxQueryIDs))]
 	assert.False(t, ok)
 }
 
@@ -372,15 +380,17 @@ func TestHandleQuery_IgnoresInvalidPostIDs(t *testing.T) {
 	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
 	api.On("GetChannel", channelID).Return(channel, nil)
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
-	api.On("GetChannelMembers", channelID, 0, 2).Return(model.ChannelMembers{{UserId: userID}, {UserId: otherID}}, nil)
+	_ = otherID
 
-	// An invalid id like "post1" (not 26 chars) must be dropped, not queried.
+	// An invalid id like "post1" (not 26 chars) must be dropped before anything is
+	// looked up at all — not even the channel is paged.
 	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{"post1", ""}}), userID)
 	require.Equal(t, http.StatusOK, w.Code)
 
 	var resp queryResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	assert.Empty(t, resp.Receipts)
+	assert.Empty(t, resp.Posts)
+	api.AssertNotCalled(t, "GetPostsForChannel", channelID, 0, maxQueryIDs)
 }
 
 func TestHandleQuery_EmptyChannelID400(t *testing.T) {
@@ -430,10 +440,13 @@ func TestHandleRead_IgnoresUserIDInBody(t *testing.T) {
 	// The identity must come from the header (attacker member), and the reader
 	// recorded for the receipt must be `attacker`, not whatever the body said.
 	api.On("HasPermissionToChannel", attacker, channelID, model.PermissionReadChannel).Return(true)
+	api.On("KVGet", idxKey(channelID)).Return(nil, nil)
+	api.On("KVSetWithOptions", idxKey(channelID), mock.Anything, mock.Anything).Return(true, nil)
 	api.On("KVGet", wmKey(channelID, attacker)).Return(nil, nil)
 	api.On("KVSetWithOptions", wmKey(channelID, attacker), mock.Anything, mock.Anything).Return(true, nil)
 	api.On("KVSetWithOptions", rrKey(channelID, postID, attacker), mock.Anything, mock.Anything).Return(true, nil)
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
+	api.On("PublishWebSocketEvent", wsEventReceiptsChanged, mock.Anything, mock.Anything).Return()
 
 	// The body tries to smuggle a different user id.
 	body := []byte(fmt.Sprintf(`{"post_id":"%s","user_id":"otheruser000000000000"}`, postID))
@@ -460,6 +473,7 @@ func TestMarkAsRead_FirstWriteWins(t *testing.T) {
 	post := &model.Post{Id: postID, UserId: validID("author"), ChannelId: channelID, CreateAt: 1000}
 	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
+	api.On("PublishWebSocketEvent", wsEventReceiptsChanged, mock.Anything, mock.Anything).Return()
 
 	first, err := p.markAsRead(readerID, post, channel)
 	require.NoError(t, err)
@@ -477,7 +491,7 @@ func TestMarkAsRead_FirstWriteWins(t *testing.T) {
 			wsCalls++
 		}
 	}
-	assert.Equal(t, 1, wsCalls, "only the first read publishes a WS event")
+	assert.Equal(t, 2, wsCalls, "only the first read publishes the targeted and channel invalidation events")
 }
 
 // --- The watermark is the authority on "already read" ------------------------
@@ -491,6 +505,7 @@ func TestMarkAsRead_ExpiredReceiptKeepsWatermarkTime(t *testing.T) {
 	p, api := setupTestPlugin(t)
 	wireKV(api, kv)
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
+	api.On("PublishWebSocketEvent", wsEventReceiptsChanged, mock.Anything, mock.Anything).Return()
 
 	readerID := validID("userR")
 	channelID := validID("chanTTL")
@@ -522,6 +537,7 @@ func TestMarkAsRead_CoveredPostPrefersStoredReceipt(t *testing.T) {
 	kv := newFakeKV()
 	p, api := setupTestPlugin(t)
 	wireKV(api, kv)
+	api.On("PublishWebSocketEvent", wsEventReceiptsChanged, mock.Anything, mock.Anything).Return()
 
 	readerID := validID("userR")
 	channelID := validID("chanEX")
@@ -548,18 +564,20 @@ func TestHandleQuery_SelfDMReturnsEmptyResult(t *testing.T) {
 	userID := validID("userSelf")
 	channelID := validID("chanSelf")
 
+	selfPost := validID("postSelf")
 	api.On("GetChannel", channelID).Return(&model.Channel{Id: channelID, Type: model.ChannelTypeDirect}, nil)
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
-	api.On("GetChannelMembers", channelID, 0, 2).Return(model.ChannelMembers{{UserId: userID}}, nil)
+	api.On("KVGet", idxKey(channelID)).Return(nil, nil)
+	stubChannelPosts(api, channelID, &model.Post{Id: selfPost, UserId: userID, ChannelId: channelID, CreateAt: 1000})
+	stubAllMembers(api, channelID)
 
-	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{validID("postSelf")}}), userID)
+	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{selfPost}}), userID)
 	require.Equal(t, http.StatusOK, w.Code)
 
 	var resp queryResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	assert.Empty(t, resp.Receipts)
-	assert.Nil(t, resp.Watermark)
+	assert.Zero(t, resp.Posts[selfPost].Count, "nobody else is in a personal-notes DM")
 
-	// No KV lookup is needed at all for a channel nobody else reads.
-	api.AssertNotCalled(t, "KVGet", mock.Anything)
+	// An empty reader index needs no wm_/rr_ lookup.
+	api.AssertNotCalled(t, "KVGet", wmKey(channelID, mock.Anything))
 }
