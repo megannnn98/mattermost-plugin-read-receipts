@@ -85,7 +85,8 @@ func (p *Plugin) handleRead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Channel) (*Receipt, error) {
-	if err := p.ensureReaderIndexed(channel.Id, readerID); err != nil {
+	indexedNow, err := p.ensureReaderIndexed(channel.Id, readerID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -102,6 +103,13 @@ func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Ch
 	wm, _, err := p.getWatermarkRaw(channel.Id, readerID)
 	if err != nil {
 		return nil, err
+	}
+	// A v0.1 reader can have a watermark without an idx_ entry. Indexing them
+	// immediately makes every post below that watermark count as read, including
+	// if a later receipt write fails. Refresh channel aggregates once, now.
+	invalidatedByLegacyWatermark := indexedNow && wm != nil
+	if invalidatedByLegacyWatermark {
+		p.publishReceiptsChangedWS(channel.Id)
 	}
 	if wm != nil && post.CreateAt <= wm.CreateAt {
 		// Exact time from the per-post receipt when it is still there, the
@@ -156,7 +164,7 @@ func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Ch
 	if written || advanced {
 		p.publishReceiptWS(receipt, post.UserId)
 	}
-	if advanced {
+	if advanced && !invalidatedByLegacyWatermark {
 		p.publishReceiptsChangedWS(channel.Id)
 	}
 

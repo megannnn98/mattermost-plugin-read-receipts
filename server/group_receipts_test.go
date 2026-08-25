@@ -55,7 +55,7 @@ func TestEnsureReaderIndexed_ConcurrentReadersAllLand(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
-			if err := p.ensureReaderIndexed(channelID, validID(fmt.Sprintf("rdr%d", i))); err != nil {
+			if _, err := p.ensureReaderIndexed(channelID, validID(fmt.Sprintf("rdr%d", i))); err != nil {
 				t.Errorf("ensureReaderIndexed: %v", err)
 			}
 		}(i)
@@ -81,7 +81,9 @@ func TestEnsureReaderIndexed_RepeatDoesNotWrite(t *testing.T) {
 	channelID := validID("chanIdxOnce")
 	readerID := validID("rdrOnce")
 
-	require.NoError(t, p.ensureReaderIndexed(channelID, readerID))
+	added, err := p.ensureReaderIndexed(channelID, readerID)
+	require.NoError(t, err)
+	require.True(t, added)
 
 	writes := 0
 	kv.failSet = func(key string) *model.AppError {
@@ -90,7 +92,9 @@ func TestEnsureReaderIndexed_RepeatDoesNotWrite(t *testing.T) {
 		}
 		return nil
 	}
-	require.NoError(t, p.ensureReaderIndexed(channelID, readerID))
+	added, err = p.ensureReaderIndexed(channelID, readerID)
+	require.NoError(t, err)
+	assert.False(t, added)
 	assert.Zero(t, writes, "an already indexed reader must not be written again")
 }
 
@@ -109,7 +113,9 @@ func TestEnsureReaderIndexed_FullIndexOfMembersIsNotAnError(t *testing.T) {
 	kv.set(idxKey(channelID), mustJSON(t, full))
 	stubMembers(api, channelID, full...)
 
-	require.NoError(t, p.ensureReaderIndexed(channelID, validID("rdrOverflow")))
+	added, err := p.ensureReaderIndexed(channelID, validID("rdrOverflow"))
+	require.NoError(t, err)
+	assert.False(t, added)
 	assert.Len(t, readIndex(t, kv, channelID), maxIndexReaders, "the index must stay capped and keep what it had")
 }
 
@@ -138,7 +144,9 @@ func TestEnsureReaderIndexed_PrunesDepartedReadersWhenFull(t *testing.T) {
 	newcomer := validID("rdrNewcomer")
 	stubMembers(api, channelID, append(append([]string{}, stayed...), newcomer)...)
 
-	require.NoError(t, p.ensureReaderIndexed(channelID, newcomer))
+	added, err := p.ensureReaderIndexed(channelID, newcomer)
+	require.NoError(t, err)
+	assert.True(t, added)
 
 	stored := readIndex(t, kv, channelID)
 	assert.Len(t, stored, len(stayed)+1)
@@ -224,6 +232,7 @@ func TestMarkAsRead_IndexesReaderOnCoveredPost(t *testing.T) {
 	kv := newFakeKV()
 	p, api := setupTestPlugin(t)
 	wireKV(api, kv)
+	api.On("PublishWebSocketEvent", wsEventReceiptsChanged, mock.Anything, mock.Anything).Return()
 
 	channelID := validID("chanCovered")
 	readerID := validID("rdrCovered")
@@ -280,6 +289,79 @@ func TestMarkAsRead_PublishesSafeChannelInvalidationForWatermarkAdvance(t *testi
 	assert.NotContains(t, payload, "reader_id")
 	assert.NotContains(t, payload, "post_id")
 	assert.Equal(t, channelID, invalidation.Arguments.Get(2).(*model.WebsocketBroadcast).ChannelId)
+}
+
+func TestMarkAsRead_LegacyIndexedReaderPublishesInvalidation(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	api.On("PublishWebSocketEvent", mock.Anything, mock.Anything, mock.Anything).Return()
+
+	channelID := validID("chanLegacyIndex")
+	readerID := validID("readerLegacy")
+	post := &model.Post{Id: validID("postLegacy"), UserId: validID("authorLegacy"), ChannelId: channelID, CreateAt: 1000}
+	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
+	kv.set(wmKey(channelID, readerID), mustJSON(t, Watermark{PostID: validID("newerLegacy"), CreateAt: 5000, ReadAt: 6000}))
+
+	_, err := p.markAsRead(readerID, post, channel)
+	require.NoError(t, err)
+	assert.Equal(t, []string{readerID}, readIndex(t, kv, channelID))
+
+	invalidations := 0
+	for _, call := range api.Calls {
+		if call.Method != "PublishWebSocketEvent" || call.Arguments.Get(0) != wsEventReceiptsChanged {
+			continue
+		}
+		invalidations++
+		payload := call.Arguments.Get(1).(map[string]interface{})
+		assert.Equal(t, map[string]interface{}{"channel_id": channelID}, payload)
+		assert.NotContains(t, payload, "reader_id")
+		assert.NotContains(t, payload, "post_id")
+	}
+	assert.Equal(t, 1, invalidations)
+	api.AssertNotCalled(t, "PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything)
+}
+
+func TestMarkAsRead_CoveredIndexedReaderDoesNotInvalidateAgain(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	api.On("PublishWebSocketEvent", mock.Anything, mock.Anything, mock.Anything).Return()
+
+	channelID := validID("chanAlreadyIndex")
+	readerID := validID("readerAlready")
+	post := &model.Post{Id: validID("postAlready"), UserId: validID("authorAlready"), ChannelId: channelID, CreateAt: 1000}
+	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
+	kv.set(idxKey(channelID), mustJSON(t, []string{readerID}))
+	kv.set(wmKey(channelID, readerID), mustJSON(t, Watermark{PostID: validID("newerAlready"), CreateAt: 5000, ReadAt: 6000}))
+
+	_, err := p.markAsRead(readerID, post, channel)
+	require.NoError(t, err)
+	api.AssertNotCalled(t, "PublishWebSocketEvent", mock.Anything, mock.Anything, mock.Anything)
+}
+
+func TestMarkAsRead_NewReaderAdvancesWatermarkWithOneInvalidation(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	api.On("PublishWebSocketEvent", mock.Anything, mock.Anything, mock.Anything).Return()
+
+	channelID := validID("chanNewIndex")
+	readerID := validID("readerNew")
+	post := &model.Post{Id: validID("postNewIndex"), UserId: validID("authorNewIndex"), ChannelId: channelID, CreateAt: 1000}
+	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
+
+	_, err := p.markAsRead(readerID, post, channel)
+	require.NoError(t, err)
+
+	invalidations := 0
+	for _, call := range api.Calls {
+		if call.Method == "PublishWebSocketEvent" && call.Arguments.Get(0) == wsEventReceiptsChanged {
+			invalidations++
+		}
+	}
+	assert.Equal(t, 1, invalidations)
+	api.AssertCalled(t, "PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything)
 }
 
 func TestWatermarkAdvanceEventuallyRefreshesOlderPostsOfOtherAuthors(t *testing.T) {

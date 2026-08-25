@@ -537,6 +537,7 @@ func TestMarkAsRead_CoveredPostPrefersStoredReceipt(t *testing.T) {
 	kv := newFakeKV()
 	p, api := setupTestPlugin(t)
 	wireKV(api, kv)
+	api.On("PublishWebSocketEvent", wsEventReceiptsChanged, mock.Anything, mock.Anything).Return()
 
 	readerID := validID("userR")
 	channelID := validID("chanEX")

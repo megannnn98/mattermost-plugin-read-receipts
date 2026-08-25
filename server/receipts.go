@@ -170,45 +170,48 @@ func (p *Plugin) pruneReaderIndex(channelID string, readers []string) ([]string,
 	return kept, nil
 }
 
-func (p *Plugin) ensureReaderIndexed(channelID, readerID string) error {
+// ensureReaderIndexed reports whether this call added readerID to the index.
+// Callers need that fact because adding a legacy reader with an existing
+// watermark immediately changes aggregate counts, even if no watermark advances.
+func (p *Plugin) ensureReaderIndexed(channelID, readerID string) (bool, error) {
 	key := idxKey(channelID)
 	for attempt := 0; attempt < maxIndexCASRetries; attempt++ {
 		readers, raw, err := p.getReaderIndex(channelID)
 		if err != nil {
-			return err
+			return false, err
 		}
 		for _, existing := range readers {
 			if existing == readerID {
-				return nil
+				return false, nil
 			}
 		}
 		if len(readers) >= maxIndexReaders {
 			pruned, err := p.pruneReaderIndex(channelID, readers)
 			if err != nil {
-				return err
+				return false, err
 			}
 			if len(pruned) >= maxIndexReaders {
 				p.logWarn("reader index is full", "channel_id", channelID, "max_readers", maxIndexReaders)
-				return nil
+				return false, nil
 			}
 			readers = pruned
 		}
 		data, err := json.Marshal(append(readers, readerID))
 		if err != nil {
-			return fmt.Errorf("marshal reader index: %w", err)
+			return false, fmt.Errorf("marshal reader index: %w", err)
 		}
 		ok, appErr := p.API.KVSetWithOptions(key, data, model.PluginKVSetOptions{Atomic: true, OldValue: raw})
 		if appErr != nil {
-			return fmt.Errorf("kv set reader index: %s", appErr.Error())
+			return false, fmt.Errorf("kv set reader index: %s", appErr.Error())
 		}
 		if ok {
-			return nil
+			return true, nil
 		}
 	}
 	// Exhaustion is reported, never swallowed: the caller turns it into a 500 and
 	// the client's backoff retries once the burst is over. Silently giving up
 	// would drop the reader from every future count.
-	return fmt.Errorf("reader index CAS failed after %d attempts", maxIndexCASRetries)
+	return false, fmt.Errorf("reader index CAS failed after %d attempts", maxIndexCASRetries)
 }
 
 // getWatermarkRaw returns the parsed watermark AND the raw bytes that were read
