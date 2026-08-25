@@ -1,3 +1,5 @@
+import {GlobalState} from './types';
+
 export interface PostContext {
     postId: string;
     channelId: string;
@@ -8,7 +10,7 @@ export interface PostContext {
     isDeleted: boolean;
 }
 
-export function getPostContext(state: any, postId: string): PostContext | null {
+export function getPostContext(state: GlobalState, postId: string): PostContext | null {
     const post = state?.entities?.posts?.posts?.[postId];
     if (!post) {
         return null;
@@ -33,7 +35,7 @@ export function getPostContext(state: any, postId: string): PostContext | null {
  * DM channel. The current-channel check keeps search results, permalink views
  * and RHS previews of other channels from silently marking posts as read.
  */
-export function shouldReportRead(state: any, postId: string): boolean {
+export function shouldReportRead(state: GlobalState, postId: string): boolean {
     const ctx = getPostContext(state, postId);
     if (!ctx) {
         return false;

@@ -1,16 +1,7 @@
 import {PLUGIN_ID} from './client';
+import {PluginAction, PluginState, Watermark} from './types';
 
-export interface Watermark {
-    post_id: string;
-    create_at: number;
-    read_at: number;
-}
-
-export interface PluginState {
-    watermarks: Record<string, Watermark>;
-    receipts: Record<string, number>;
-    debug: boolean;
-}
+export type {PluginState, Watermark} from './types';
 
 const initialState: PluginState = {
     watermarks: {},
@@ -23,13 +14,27 @@ export const ACTION_TYPES = {
     WS_RECEIPT: `${PLUGIN_ID}_WS_RECEIPT`,
 };
 
+type QueryActionData = {
+    channelId: string;
+    watermark?: Watermark;
+    receipts?: Record<string, number>;
+    debug?: boolean;
+};
+
+type WSReceiptActionData = {
+    channel_id: string;
+    post_id: string;
+    create_at: number;
+    read_at: number;
+};
+
 export function reducer(
     state: PluginState = initialState,
-    action: {type: string; data?: any},
+    action: PluginAction,
 ): PluginState {
     switch (action.type) {
         case ACTION_TYPES.RECEIPTS_QUERY: {
-            const {channelId, watermark, receipts, debug} = action.data;
+            const {channelId, watermark, receipts = {}, debug} = (action.data ?? {}) as QueryActionData;
             const newWatermarks = {...state.watermarks};
             if (watermark) {
                 const existing = newWatermarks[channelId];
@@ -46,7 +51,7 @@ export function reducer(
         }
 
         case ACTION_TYPES.WS_RECEIPT: {
-            const {channel_id, post_id, create_at, read_at} = action.data;
+            const {channel_id, post_id, create_at, read_at} = (action.data ?? {}) as WSReceiptActionData;
             const newWatermarks = {...state.watermarks};
             const existing = newWatermarks[channel_id];
             if (!existing || create_at > existing.create_at) {

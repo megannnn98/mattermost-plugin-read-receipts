@@ -7,6 +7,7 @@ import {setStore} from './store_ref';
 import {ChannelWatcher, startChannelWatcher} from './channel_watcher';
 import {resetDeduplicator} from './actions';
 import {resetVisibilityTracker} from './visibility';
+import {PluginRegistry, PluginStore} from './types';
 
 declare global {
     interface Window {
@@ -17,7 +18,7 @@ declare global {
 export class ReadReceiptsPlugin {
     private watcher: ChannelWatcher | null = null;
 
-    initialize(registry: any, store: any): void {
+    initialize(registry: PluginRegistry, store: PluginStore): void {
         if (!isDesktopClient()) {
             console.debug(`[${PLUGIN_ID}] not Mattermost Desktop — plugin disabled`);
             return;
@@ -27,8 +28,8 @@ export class ReadReceiptsPlugin {
 
         registry.registerReducer(reducer);
 
-        registry.registerWebSocketEventHandler(WS_EVENT, (msg: unknown) => {
-            handleWebSocketEvent(msg as never, store);
+        registry.registerWebSocketEventHandler(WS_EVENT, (msg) => {
+            handleWebSocketEvent(msg, store);
         });
 
         registry.registerPostMessageAttachmentComponent(ReadReceipt);

@@ -1,8 +1,9 @@
 import {loadChannelReceipts} from './actions';
+import {GlobalState, PluginStore} from './types';
 
 export const MAX_QUERY_IDS = 200;
 
-export function isDirectChannel(state: any, channelId: string): boolean | null {
+export function isDirectChannel(state: GlobalState, channelId: string): boolean | null {
     const channel = state?.entities?.channels?.channels?.[channelId];
     if (!channel) {
         return null;
@@ -21,7 +22,7 @@ export function isDirectChannel(state: any, channelId: string): boolean | null {
  * flags instead of by index. Sorting the collected posts by `create_at` makes
  * the result independent of both the block order and the order inside a block.
  */
-export function collectOwnPostIds(state: any, channelId: string, limit: number = MAX_QUERY_IDS): string[] {
+export function collectOwnPostIds(state: GlobalState, channelId: string, limit: number = MAX_QUERY_IDS): string[] {
     const currentUserId = state?.entities?.users?.currentUserId;
     const posts = state?.entities?.posts?.posts;
     const blocks = state?.entities?.posts?.postsInChannel?.[channelId];
@@ -57,7 +58,7 @@ export interface ChannelWatcher {
  * Loads persisted receipts once per opened DM channel. Event-driven: reacts to
  * Redux store changes (channel switch, first batch of posts arriving), no polling.
  */
-export function startChannelWatcher(store: any): ChannelWatcher {
+export function startChannelWatcher(store: PluginStore): ChannelWatcher {
     let handledChannelId: string | null = null;
     let inFlight = false;
 

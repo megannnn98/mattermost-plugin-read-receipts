@@ -1,3 +1,5 @@
+import {GlobalState} from './types';
+
 export type SupportedLocale = 'en' | 'ru';
 
 const MESSAGES = {
@@ -25,9 +27,9 @@ export function resolveLocale(raw?: string | null): SupportedLocale {
     return raw.toLowerCase().startsWith('ru') ? 'ru' : 'en';
 }
 
-export function getLocaleFromState(state: any): SupportedLocale {
+export function getLocaleFromState(state: GlobalState): SupportedLocale {
     const users = state?.entities?.users;
-    const profile = users?.profiles?.[users?.currentUserId];
+    const profile = users?.profiles?.[users?.currentUserId ?? ''];
     return resolveLocale(profile?.locale);
 }
 

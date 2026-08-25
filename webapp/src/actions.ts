@@ -1,5 +1,6 @@
 import {PLUGIN_ID, fetchChannelReceipts, reportRead} from './client';
 import {ACTION_TYPES} from './reducer';
+import {PluginStore} from './types';
 
 class ReadDeduplicator {
     private sentCreateAt: Record<string, number> = {};
@@ -56,7 +57,7 @@ export function resetDeduplicator(): void {
 }
 
 export async function loadChannelReceipts(
-    store: any,
+    store: PluginStore,
     channelId: string,
     postIds: string[],
 ): Promise<void> {
@@ -81,7 +82,7 @@ export async function loadChannelReceipts(
 }
 
 export async function sendReadReceipt(
-    store: any,
+    store: PluginStore,
     channelId: string,
     postId: string,
     createAt: number,
