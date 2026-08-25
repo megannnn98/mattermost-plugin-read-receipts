@@ -5,7 +5,7 @@ import {PLUGIN_ID} from './client';
 import ReadReceipt from './components/read_receipt';
 import {setStore} from './store_ref';
 import {ChannelWatcher, startChannelWatcher} from './channel_watcher';
-import {loadPluginConfig, resetDeduplicator} from './actions';
+import {invalidatePluginConfigRequests, loadPluginConfig, resetDeduplicator} from './actions';
 import {resetVisibilityTracker} from './visibility';
 import {PluginRegistry, PluginStore} from './types';
 
@@ -61,6 +61,7 @@ export class ReadReceiptsPlugin {
     }
 
     uninitialize(): void {
+        invalidatePluginConfigRequests();
         this.watcher?.stop();
         this.watcher = null;
         resetDeduplicator();

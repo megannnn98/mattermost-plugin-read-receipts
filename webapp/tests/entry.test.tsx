@@ -161,6 +161,36 @@ describe('plugin entry point', () => {
         plugin.uninitialize();
     });
 
+    it('does not let an old startup response re-enable a channel after reconnect', async () => {
+        (window as any).desktopAPI = {getAppInfo: jest.fn().mockResolvedValue({name: 'Mattermost', version: '5.0.0'})};
+        const registry = makeRegistry();
+        const refresh = jest.fn();
+        mockedStartChannelWatcher.mockReturnValue({stop: jest.fn(), refresh, refreshSoon: jest.fn(), check: jest.fn()} as never);
+        let resolveFirst: (config: {enabled_channel_types: string}) => void = () => undefined;
+        let resolveSecond: (config: {enabled_channel_types: string}) => void = () => undefined;
+        mockedConfig
+            .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+            .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve; }));
+        const store = makeConfigStore();
+        const plugin = new ReadReceiptsPlugin();
+        plugin.initialize(registry as never, store as never);
+
+        registry.registerReconnectHandler.mock.calls[0][0]();
+        resolveSecond({enabled_channel_types: 'D'});
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(store.getState()['plugins-com.integrasources.read-receipts'].config).toEqual({enabled_channel_types: 'D'});
+        expect(refresh).toHaveBeenCalledTimes(1);
+
+        resolveFirst({enabled_channel_types: 'DG'});
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(store.getState()['plugins-com.integrasources.read-receipts'].config).toEqual({enabled_channel_types: 'D'});
+        expect(refresh).toHaveBeenCalledTimes(1);
+        plugin.uninitialize();
+    });
+
     it('stays inert when the reconnect configuration request fails', async () => {
         (window as any).desktopAPI = {getAppInfo: jest.fn().mockResolvedValue({name: 'Mattermost', version: '5.0.0'})};
         const registry = makeRegistry();
@@ -178,5 +208,27 @@ describe('plugin entry point', () => {
         expect(store.getState()['plugins-com.integrasources.read-receipts'].config).toBeNull();
         expect(refresh).not.toHaveBeenCalled();
         plugin.uninitialize();
+    });
+
+    it('ignores a pending startup configuration after teardown', async () => {
+        (window as any).desktopAPI = {getAppInfo: jest.fn().mockResolvedValue({name: 'Mattermost', version: '5.0.0'})};
+        const registry = makeRegistry();
+        const refresh = jest.fn();
+        mockedStartChannelWatcher.mockReturnValue({stop: jest.fn(), refresh, refreshSoon: jest.fn(), check: jest.fn()} as never);
+        let resolveConfig: (config: {enabled_channel_types: string}) => void = () => undefined;
+        mockedConfig.mockImplementationOnce(() => new Promise((resolve) => {
+            resolveConfig = resolve;
+        }));
+        const store = makeConfigStore();
+        const plugin = new ReadReceiptsPlugin();
+
+        plugin.initialize(registry as never, store as never);
+        plugin.uninitialize();
+        resolveConfig({enabled_channel_types: 'DG'});
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(store.getState()['plugins-com.integrasources.read-receipts'].config).toBeNull();
+        expect(refresh).not.toHaveBeenCalled();
     });
 });

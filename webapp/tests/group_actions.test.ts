@@ -1,5 +1,5 @@
-import {loadChannelReceipts, loadPluginConfig, loadPostReaders, resetDeduplicator, sendReadReceipt} from '../src/actions';
-import {ACTION_TYPES} from '../src/reducer';
+import {invalidatePluginConfigRequests, loadChannelReceipts, loadPluginConfig, loadPostReaders, resetDeduplicator, sendReadReceipt} from '../src/actions';
+import {ACTION_TYPES, reducer} from '../src/reducer';
 import * as client from '../src/client';
 import {RequestError} from '../src/client';
 
@@ -39,8 +39,30 @@ function makeStore(profiles: Record<string, unknown> = {}, pluginProfiles: Recor
     } as any;
 }
 
+function makeConfigStore() {
+    let pluginState = reducer(undefined, {type: 'INIT'});
+    return {
+        getState: () => ({[PLUGIN_BRANCH]: pluginState, entities: {users: {}}}),
+        dispatch: (action: any) => {
+            pluginState = reducer(pluginState, action);
+        },
+        subscribe: jest.fn().mockReturnValue(() => undefined),
+    } as any;
+}
+
+function deferred<T>() {
+    let resolve: (value: T) => void = () => undefined;
+    let reject: (reason?: unknown) => void = () => undefined;
+    const promise = new Promise<T>((onResolve, onReject) => {
+        resolve = onResolve;
+        reject = onReject;
+    });
+    return {promise, resolve, reject};
+}
+
 beforeEach(() => {
     resetDeduplicator();
+    invalidatePluginConfigRequests();
     jest.clearAllMocks();
     jest.spyOn(console, 'error').mockImplementation(() => undefined);
 });
@@ -156,5 +178,38 @@ describe('loadPluginConfig', () => {
         // would report reads for a type the administrator may just have disabled.
         expect(store.dispatch).toHaveBeenCalledTimes(1);
         expect(store.dispatch).toHaveBeenCalledWith({type: ACTION_TYPES.CONFIG_LOADING});
+    });
+
+    it('keeps the newest successful response when requests resolve out of order', async () => {
+        const first = deferred<{enabled_channel_types: string}>();
+        const second = deferred<{enabled_channel_types: string}>();
+        mockedConfig.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+        const store = makeConfigStore();
+
+        const r1 = loadPluginConfig(store);
+        const r2 = loadPluginConfig(store);
+        second.resolve({enabled_channel_types: 'D'});
+        expect(await r2).toBe(true);
+        expect(store.getState()[PLUGIN_BRANCH].config).toEqual({enabled_channel_types: 'D'});
+
+        first.resolve({enabled_channel_types: 'DG'});
+        expect(await r1).toBe(false);
+        expect(store.getState()[PLUGIN_BRANCH].config).toEqual({enabled_channel_types: 'D'});
+    });
+
+    it('ignores an old failure after a newer request has succeeded', async () => {
+        const first = deferred<{enabled_channel_types: string}>();
+        const second = deferred<{enabled_channel_types: string}>();
+        mockedConfig.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+        const store = makeConfigStore();
+
+        const r1 = loadPluginConfig(store);
+        const r2 = loadPluginConfig(store);
+        second.resolve({enabled_channel_types: 'D'});
+        expect(await r2).toBe(true);
+        first.reject(new Error('old request failed'));
+        expect(await r1).toBe(false);
+
+        expect(store.getState()[PLUGIN_BRANCH].config).toEqual({enabled_channel_types: 'D'});
     });
 });

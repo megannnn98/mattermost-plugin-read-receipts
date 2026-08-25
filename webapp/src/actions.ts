@@ -42,6 +42,7 @@ class ReadDeduplicator {
 }
 
 let globalDeduplicator: ReadDeduplicator | null = null;
+let configRequestGeneration = 0;
 
 export function getDeduplicator(): ReadDeduplicator {
     if (!globalDeduplicator) {
@@ -55,6 +56,13 @@ export function resetDeduplicator(): void {
         globalDeduplicator.resetAll();
         globalDeduplicator = null;
     }
+}
+
+// Config requests may overlap across startup and reconnect. Advancing this
+// generation makes every earlier response inert, including one that resolves
+// after the plugin has been torn down.
+export function invalidatePluginConfigRequests(): void {
+    configRequestGeneration += 1;
 }
 
 export async function loadChannelReceipts(
@@ -157,14 +165,21 @@ export async function loadPostReaders(store: PluginStore, postId: string, offset
  * or a read report — rather than being discovered from a 403 after the fact.
  */
 export async function loadPluginConfig(store: PluginStore): Promise<boolean> {
+    const generation = ++configRequestGeneration;
     // Reconnect must fail closed: a cached allow-list may have been disabled by
     // an administrator while the websocket was down.
     store.dispatch({type: ACTION_TYPES.CONFIG_LOADING});
     try {
         const config = await fetchPluginConfig();
+        if (generation !== configRequestGeneration) {
+            return false;
+        }
         store.dispatch({type: ACTION_TYPES.CONFIG, data: {config}});
         return true;
     } catch (error) {
+        if (generation !== configRequestGeneration) {
+            return false;
+        }
         console.error(`[${PLUGIN_ID}] Failed to load plugin configuration:`, error);
         return false;
     }
