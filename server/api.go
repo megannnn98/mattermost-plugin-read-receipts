@@ -105,13 +105,15 @@ func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Ch
 		return nil, err
 	}
 	// A v0.1 reader can have a watermark without an idx_ entry. Indexing them
-	// immediately makes every post below that watermark count as read, including
-	// if a later receipt write fails. Refresh channel aggregates once, now.
-	invalidatedByLegacyWatermark := indexedNow && wm != nil
-	if invalidatedByLegacyWatermark {
-		p.publishReceiptsChangedWS(channel.Id)
-	}
+	// makes every post below that watermark visible to aggregate queries. The
+	// invalidation is deliberately deferred until a terminal path: a newer post
+	// must first advance the watermark, while an error still needs to expose the
+	// already-visible legacy range.
+	legacyAggregateChanged := indexedNow && wm != nil
 	if wm != nil && post.CreateAt <= wm.CreateAt {
+		if legacyAggregateChanged {
+			p.publishReceiptsChangedWS(channel.Id)
+		}
 		// Exact time from the per-post receipt when it is still there, the
 		// watermark's read time as the documented approximation otherwise.
 		readAt := wm.ReadAt
@@ -132,6 +134,9 @@ func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Ch
 	// committed a read yet and a retry will just do the same work again).
 	written, err := p.setReceiptAtomic(channel.Id, post.Id, readerID, now, ttlSeconds)
 	if err != nil {
+		if legacyAggregateChanged {
+			p.publishReceiptsChangedWS(channel.Id)
+		}
 		return nil, err
 	}
 
@@ -156,6 +161,9 @@ func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Ch
 	// fixes it.
 	advanced, err := p.advanceWatermark(channel.Id, readerID, post, receipt.ReadAt)
 	if err != nil {
+		if legacyAggregateChanged {
+			p.publishReceiptsChangedWS(channel.Id)
+		}
 		return nil, err
 	}
 
@@ -164,7 +172,7 @@ func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Ch
 	if written || advanced {
 		p.publishReceiptWS(receipt, post.UserId)
 	}
-	if advanced && !invalidatedByLegacyWatermark {
+	if legacyAggregateChanged || advanced {
 		p.publishReceiptsChangedWS(channel.Id)
 	}
 

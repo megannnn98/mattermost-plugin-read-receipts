@@ -364,6 +364,82 @@ func TestMarkAsRead_NewReaderAdvancesWatermarkWithOneInvalidation(t *testing.T) 
 	api.AssertCalled(t, "PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything)
 }
 
+func TestMarkAsRead_LegacyReaderAdvancesWatermarkBeforeInvalidation(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	api.On("PublishWebSocketEvent", mock.Anything, mock.Anything, mock.Anything).Return()
+
+	channelID := validID("chanLegacyNewer")
+	readerID := validID("readerLegacyNewer")
+	post := &model.Post{Id: validID("postLegacyNewer"), UserId: validID("authorLegacyNewer"), ChannelId: channelID, CreateAt: 2000}
+	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
+	kv.set(wmKey(channelID, readerID), mustJSON(t, Watermark{PostID: validID("legacyOlder"), CreateAt: 1000, ReadAt: 1500}))
+
+	_, err := p.markAsRead(readerID, post, channel)
+	require.NoError(t, err)
+	assert.Equal(t, []string{readerID}, readIndex(t, kv, channelID))
+
+	var watermark Watermark
+	require.NoError(t, json.Unmarshal(kv.get(wmKey(channelID, readerID)), &watermark))
+	assert.Equal(t, int64(2000), watermark.CreateAt)
+
+	invalidations := 0
+	watermarkWrite := -1
+	invalidation := -1
+	for i, call := range api.Calls {
+		if call.Method == "KVSetWithOptions" && call.Arguments.Get(0) == wmKey(channelID, readerID) {
+			watermarkWrite = i
+		}
+		if call.Method == "PublishWebSocketEvent" && call.Arguments.Get(0) == wsEventReceiptsChanged {
+			invalidations++
+			invalidation = i
+			payload := call.Arguments.Get(1).(map[string]interface{})
+			assert.Equal(t, map[string]interface{}{"channel_id": channelID}, payload)
+			assert.NotContains(t, payload, "reader_id")
+			assert.NotContains(t, payload, "post_id")
+		}
+	}
+	assert.Equal(t, 1, invalidations)
+	assert.Greater(t, watermarkWrite, -1)
+	assert.Greater(t, invalidation, watermarkWrite, "the refresh signal must observe the final watermark")
+	api.AssertCalled(t, "PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything)
+}
+
+func TestMarkAsRead_LegacyIndexInvalidatesWhenNewerReceiptWriteFails(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	api.On("PublishWebSocketEvent", mock.Anything, mock.Anything, mock.Anything).Return()
+
+	channelID := validID("chanLegacyFailure")
+	readerID := validID("readerLegacyFailure")
+	post := &model.Post{Id: validID("postLegacyFailure"), UserId: validID("authorLegacyFailure"), ChannelId: channelID, CreateAt: 2000}
+	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
+	old := Watermark{PostID: validID("legacyFailureOlder"), CreateAt: 1000, ReadAt: 1500}
+	kv.set(wmKey(channelID, readerID), mustJSON(t, old))
+	kv.failSet = func(key string) *model.AppError {
+		if key == rrKey(channelID, post.Id, readerID) {
+			return model.NewAppError("kv", "receipt failed", nil, "", http.StatusInternalServerError)
+		}
+		return nil
+	}
+
+	_, err := p.markAsRead(readerID, post, channel)
+	require.Error(t, err)
+	assert.Equal(t, []string{readerID}, readIndex(t, kv, channelID))
+	assert.Equal(t, mustJSON(t, old), kv.get(wmKey(channelID, readerID)))
+
+	invalidations := 0
+	for _, call := range api.Calls {
+		if call.Method == "PublishWebSocketEvent" && call.Arguments.Get(0) == wsEventReceiptsChanged {
+			invalidations++
+		}
+	}
+	assert.Equal(t, 1, invalidations)
+	api.AssertNotCalled(t, "PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything)
+}
+
 func TestWatermarkAdvanceEventuallyRefreshesOlderPostsOfOtherAuthors(t *testing.T) {
 	kv := newFakeKV()
 	p, api := setupTestPlugin(t)
