@@ -26,8 +26,8 @@ export function handleWebSocketEvent(msg: WebSocketMessage, store: PluginStore):
         }
     }
 
-    const {channel_id: channelId, post_id: postId} = msg.data;
-    if (!channelId || !postId) {
+    const {channel_id: channelId, post_id: postId, reader_id: readerId} = msg.data;
+    if (!channelId || !postId || !readerId) {
         return;
     }
 
@@ -38,6 +38,7 @@ export function handleWebSocketEvent(msg: WebSocketMessage, store: PluginStore):
             post_id: postId,
             create_at: Number(msg.data.create_at ?? 0),
             read_at: Number(msg.data.read_at ?? 0),
+            reader_id: readerId,
         },
     });
 }

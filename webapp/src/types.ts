@@ -6,14 +6,23 @@
 // --- Redux state shapes -----------------------------------------------------
 
 export interface Watermark {
+    reader_id: string;
     post_id: string;
     create_at: number;
     read_at: number;
 }
 
 export interface PluginState {
-    watermarks: Record<string, Watermark>;
-    receipts: Record<string, number>;
+    watermarks: Record<string, Record<string, Watermark>>;
+    receipts: Record<string, Record<string, number>>;
+    readers: Record<string, {list: ReaderRead[]; truncated: boolean}>;
+    profiles: Record<string, MMUserProfile>;
+}
+
+export interface ReaderRead {
+    user_id: string;
+    read_at: number;
+    exact: boolean;
 }
 
 export interface MMPost {
@@ -31,6 +40,9 @@ export interface MMChannel {
 }
 
 export interface MMUserProfile {
+    username?: string;
+    first_name?: string;
+    last_name?: string;
     locale?: string;
 }
 

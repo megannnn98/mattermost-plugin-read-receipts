@@ -15,14 +15,14 @@ describe('handleWebSocketEvent', () => {
         handleWebSocketEvent(
             {
                 event: WS_EVENT,
-                data: {channel_id: 'dm1', post_id: 'p1', create_at: 100, read_at: 200},
+                data: {channel_id: 'dm1', post_id: 'p1', create_at: 100, read_at: 200, reader_id: 'reader'},
             },
             store,
         );
 
         expect(store.dispatch).toHaveBeenCalledWith({
             type: ACTION_TYPES.WS_RECEIPT,
-            data: {channel_id: 'dm1', post_id: 'p1', create_at: 100, read_at: 200},
+            data: {channel_id: 'dm1', post_id: 'p1', create_at: 100, read_at: 200, reader_id: 'reader'},
         });
     });
 
@@ -30,14 +30,14 @@ describe('handleWebSocketEvent', () => {
         handleWebSocketEvent(
             {
                 event: WS_EVENT,
-                data: {channel_id: 'dm1', post_id: 'p1', create_at: '100', read_at: '200'},
+                data: {channel_id: 'dm1', post_id: 'p1', create_at: '100', read_at: '200', reader_id: 'reader'},
             },
             store,
         );
 
         expect(store.dispatch).toHaveBeenCalledWith({
             type: ACTION_TYPES.WS_RECEIPT,
-            data: {channel_id: 'dm1', post_id: 'p1', create_at: 100, read_at: 200},
+            data: {channel_id: 'dm1', post_id: 'p1', create_at: 100, read_at: 200, reader_id: 'reader'},
         });
     });
 
@@ -45,14 +45,14 @@ describe('handleWebSocketEvent', () => {
         handleWebSocketEvent(
             {
                 event: WS_EVENT,
-                data: {channel_id: 'dm1', post_id: 'p1', create_at: 100, read_at: 200, author_id: 'me'},
+                data: {channel_id: 'dm1', post_id: 'p1', create_at: 100, read_at: 200, reader_id: 'reader', author_id: 'me'},
             },
             store,
         );
 
         expect(store.dispatch).toHaveBeenCalledWith({
             type: ACTION_TYPES.WS_RECEIPT,
-            data: {channel_id: 'dm1', post_id: 'p1', create_at: 100, read_at: 200},
+            data: {channel_id: 'dm1', post_id: 'p1', create_at: 100, read_at: 200, reader_id: 'reader'},
         });
     });
 
@@ -72,7 +72,21 @@ describe('handleWebSocketEvent', () => {
         handleWebSocketEvent({event: 'posted', data: {post_id: 'p1', channel_id: 'dm1'}}, store);
         handleWebSocketEvent({event: WS_EVENT}, store);
         handleWebSocketEvent({event: WS_EVENT, data: {post_id: 'p1'}}, store);
+        handleWebSocketEvent({event: WS_EVENT, data: {post_id: 'p1', channel_id: 'dm1'}}, store);
         handleWebSocketEvent(undefined as never, store);
+
+        expect(store.dispatch).not.toHaveBeenCalled();
+    });
+    it('ignores an event without a reader id', () => {
+        // The reducer keys state by reader; a payload without one would create a
+        // bogus `undefined` reader and corrupt every count in the channel.
+        handleWebSocketEvent(
+            {
+                event: WS_EVENT,
+                data: {channel_id: 'dm1', post_id: 'p1', create_at: 100, read_at: 200},
+            },
+            store,
+        );
 
         expect(store.dispatch).not.toHaveBeenCalled();
     });
