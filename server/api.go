@@ -156,6 +156,9 @@ func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Ch
 	if written || advanced {
 		p.publishReceiptWS(receipt, post.UserId)
 	}
+	if advanced {
+		p.publishReceiptsChangedWS(channel.Id)
+	}
 
 	p.debugLog("read", "post", post.Id, "reader", readerID, "channel", channel.Id)
 
@@ -172,6 +175,18 @@ func (p *Plugin) publishReceiptWS(receipt *Receipt, authorID string) {
 		"author_id":  authorID,
 	}, &model.WebsocketBroadcast{
 		UserId: authorID,
+	})
+}
+
+// publishReceiptsChangedWS tells channel members only that their locally cached
+// aggregate statuses may be stale. In particular it must never carry reader_id,
+// post_id or a watermark: those would turn a refresh signal into a read-activity
+// side channel for someone else's posts.
+func (p *Plugin) publishReceiptsChangedWS(channelID string) {
+	p.API.PublishWebSocketEvent(wsEventReceiptsChanged, map[string]interface{}{
+		"channel_id": channelID,
+	}, &model.WebsocketBroadcast{
+		ChannelId: channelID,
 	})
 }
 

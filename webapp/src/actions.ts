@@ -157,6 +157,9 @@ export async function loadPostReaders(store: PluginStore, postId: string, offset
  * or a read report — rather than being discovered from a 403 after the fact.
  */
 export async function loadPluginConfig(store: PluginStore): Promise<boolean> {
+    // Reconnect must fail closed: a cached allow-list may have been disabled by
+    // an administrator while the websocket was down.
+    store.dispatch({type: ACTION_TYPES.CONFIG_LOADING});
     try {
         const config = await fetchPluginConfig();
         store.dispatch({type: ACTION_TYPES.CONFIG, data: {config}});

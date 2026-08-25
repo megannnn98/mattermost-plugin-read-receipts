@@ -38,6 +38,7 @@ func TestMarkAsRead_WatermarkCreated(t *testing.T) {
 	api.On("KVSetWithOptions", wmKey(channelID, readerID), mock.Anything, mock.Anything).Return(true, nil)
 	api.On("KVSetWithOptions", rrKey(channelID, postID, readerID), mock.Anything, mock.Anything).Return(true, nil)
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
+	api.On("PublishWebSocketEvent", wsEventReceiptsChanged, mock.Anything, mock.Anything).Return()
 
 	receipt, err := p.markAsRead(readerID, post, channel)
 	require.NoError(t, err)
@@ -82,6 +83,7 @@ func TestMarkAsRead_WatermarkMonotonicity(t *testing.T) {
 	api.On("KVGet", rrKey(channelID, oldPostID, readerID)).Return(nil, nil)
 
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
+	api.On("PublishWebSocketEvent", wsEventReceiptsChanged, mock.Anything, mock.Anything).Return()
 
 	receipt, err := p.markAsRead(readerID, oldPost, channel)
 	require.NoError(t, err)

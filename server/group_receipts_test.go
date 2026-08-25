@@ -238,6 +238,81 @@ func TestMarkAsRead_IndexesReaderOnCoveredPost(t *testing.T) {
 	assert.Equal(t, []string{readerID}, readIndex(t, kv, channelID))
 }
 
+func TestMarkAsRead_PublishesSafeChannelInvalidationForWatermarkAdvance(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	api.On("PublishWebSocketEvent", mock.Anything, mock.Anything, mock.Anything).Return()
+
+	channelID := validID("chanInvalidate")
+	readerID := validID("readerInvalidate")
+	authorID := validID("authorNewer")
+	post := &model.Post{Id: validID("postNewer"), UserId: authorID, ChannelId: channelID, CreateAt: 200}
+	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeGroup}
+
+	_, err := p.markAsRead(readerID, post, channel)
+	require.NoError(t, err)
+
+	var targeted, invalidation *mock.Call
+	for i := range api.Calls {
+		call := &api.Calls[i]
+		if call.Method != "PublishWebSocketEvent" {
+			continue
+		}
+		event := call.Arguments.Get(0)
+		switch event {
+		case wsEventReceipt:
+			targeted = call
+		case wsEventReceiptsChanged:
+			invalidation = call
+		}
+	}
+	require.NotNil(t, targeted, "the post author still receives the targeted receipt")
+	require.NotNil(t, invalidation, "a watermark advance must invalidate all channel aggregates")
+
+	targetedPayload := targeted.Arguments.Get(1).(map[string]interface{})
+	assert.Equal(t, readerID, targetedPayload["reader_id"])
+	assert.Equal(t, post.Id, targetedPayload["post_id"])
+	assert.Equal(t, authorID, targeted.Arguments.Get(2).(*model.WebsocketBroadcast).UserId)
+
+	payload := invalidation.Arguments.Get(1).(map[string]interface{})
+	assert.Equal(t, map[string]interface{}{"channel_id": channelID}, payload)
+	assert.NotContains(t, payload, "reader_id")
+	assert.NotContains(t, payload, "post_id")
+	assert.Equal(t, channelID, invalidation.Arguments.Get(2).(*model.WebsocketBroadcast).ChannelId)
+}
+
+func TestWatermarkAdvanceEventuallyRefreshesOlderPostsOfOtherAuthors(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	p.configuration.EnabledChannelTypes = allChannelTypes
+	api.On("PublishWebSocketEvent", mock.Anything, mock.Anything, mock.Anything).Return()
+
+	channelID := validID("chanWatermarkRefresh")
+	authorA := validID("authorOlder")
+	authorB := validID("authorNewer")
+	readerC := validID("readerAdvances")
+	older := &model.Post{Id: validID("postOlder"), UserId: authorA, ChannelId: channelID, CreateAt: 100}
+	newer := &model.Post{Id: validID("postNewer"), UserId: authorB, ChannelId: channelID, CreateAt: 200}
+	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeGroup}
+
+	_, err := p.markAsRead(readerC, newer, channel)
+	require.NoError(t, err)
+
+	api.On("GetChannel", channelID).Return(channel, nil)
+	api.On("HasPermissionToChannel", authorA, channelID, model.PermissionReadChannel).Return(true)
+	stubChannelPosts(api, channelID, older, newer)
+	stubAllMembers(api, channelID)
+	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{older.Id}}), authorA)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var response queryResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&response))
+	assert.Equal(t, 1, response.Posts[older.Id].Count,
+		"the refreshed aggregate must apply reader C's newer watermark to author A's older post")
+}
+
 // --- Group query ------------------------------------------------------------
 
 func TestHandleQuery_GroupCountsReadersWithoutExposingThem(t *testing.T) {

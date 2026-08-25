@@ -459,8 +459,10 @@ describe('channel eligibility drives the watcher', () => {
         watcher.stop();
     });
 
-    it('does not query anything before the configuration has arrived', async () => {
-        const {watcher} = watcherOn(makeState(null));
+    it.each(['D', 'G', 'P', 'O'])('does not query a %s channel before the configuration has arrived', async (type) => {
+        const state = makeState(null);
+        state.entities.channels.channels.dm1.type = type;
+        const {watcher} = watcherOn(state);
         await flush();
 
         expect(mockedFetch).not.toHaveBeenCalled();

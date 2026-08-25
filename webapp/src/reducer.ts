@@ -18,6 +18,7 @@ export const ACTION_TYPES = {
     POST_READERS: `${PLUGIN_ID}_POST_READERS`,
     PROFILES: `${PLUGIN_ID}_PROFILES`,
     CONFIG: `${PLUGIN_ID}_CONFIG`,
+    CONFIG_LOADING: `${PLUGIN_ID}_CONFIG_LOADING`,
 };
 
 type QueryActionData = {
@@ -137,6 +138,11 @@ export function reducer(
             const data = (action.data ?? {}) as {config: PluginConfig};
             return {...state, config: data.config};
         }
+
+        // Never retain an old allow-list across reconnect. Until the next config
+        // response arrives, every gate sees config=null and the plugin is inert.
+        case ACTION_TYPES.CONFIG_LOADING:
+            return {...state, config: null};
 
         default:
             return state;

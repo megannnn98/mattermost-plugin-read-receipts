@@ -204,4 +204,14 @@ describe('reducer', () => {
         });
         expect(state.config).toEqual({enabled_channel_types: 'DG'});
     });
+
+    it('forgets an old configuration while a reconnect refresh is pending', () => {
+        const configured = reducer(undefined, {
+            type: ACTION_TYPES.CONFIG,
+            data: {config: {enabled_channel_types: 'DG'}},
+        });
+        const loading = reducer(configured, {type: ACTION_TYPES.CONFIG_LOADING});
+
+        expect(loading.config).toBeNull();
+    });
 });

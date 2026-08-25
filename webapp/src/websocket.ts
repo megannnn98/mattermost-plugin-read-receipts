@@ -3,6 +3,7 @@ import {ACTION_TYPES} from './reducer';
 import {PluginStore, WebSocketMessage} from './types';
 
 export const WS_EVENT = `custom_${PLUGIN_ID}_read_receipt`;
+export const WS_RECEIPTS_CHANGED_EVENT = `custom_${PLUGIN_ID}_receipts_changed`;
 
 /**
  * `registerWebSocketEventHandler` passes the whole websocket message as the only
@@ -53,4 +54,24 @@ export function handleWebSocketEvent(msg: WebSocketMessage, store: PluginStore, 
     if (channel?.type !== 'D') {
         onCountChanged?.();
     }
+}
+
+/**
+ * A channel-level invalidation is intentionally less detailed than a receipt:
+ * it identifies only the channel and asks the author to refresh their own posts.
+ * The query endpoint remains the sole authority for counts, so this event cannot
+ * reveal who read a foreign post or how far that person read.
+ */
+export function handleReceiptsChangedEvent(msg: WebSocketMessage, store: PluginStore, onChanged?: () => void): void {
+    if (!msg || msg.event !== WS_RECEIPTS_CHANGED_EVENT || !msg.data) {
+        return;
+    }
+
+    const channelId = msg.data.channel_id;
+    const state = store.getState();
+    if (!channelId || channelId !== state?.entities?.channels?.currentChannelId || !state?.entities?.channels?.channels?.[channelId]) {
+        return;
+    }
+
+    onChanged?.();
 }

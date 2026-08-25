@@ -140,6 +140,7 @@ describe('loadPluginConfig', () => {
         const store = makeStore();
 
         expect(await loadPluginConfig(store)).toBe(true);
+        expect(store.dispatch).toHaveBeenCalledWith({type: ACTION_TYPES.CONFIG_LOADING});
         expect(store.dispatch).toHaveBeenCalledWith({
             type: ACTION_TYPES.CONFIG,
             data: {config: {enabled_channel_types: 'DG'}},
@@ -151,6 +152,9 @@ describe('loadPluginConfig', () => {
         const store = makeStore();
 
         expect(await loadPluginConfig(store)).toBe(false);
-        expect(store.dispatch).not.toHaveBeenCalled();
+        // A failed refresh deliberately leaves the old value unusable: using it
+        // would report reads for a type the administrator may just have disabled.
+        expect(store.dispatch).toHaveBeenCalledTimes(1);
+        expect(store.dispatch).toHaveBeenCalledWith({type: ACTION_TYPES.CONFIG_LOADING});
     });
 });

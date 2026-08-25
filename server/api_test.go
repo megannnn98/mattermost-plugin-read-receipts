@@ -61,6 +61,7 @@ func TestHandleRead_Success(t *testing.T) {
 	api.On("KVSetWithOptions", rrKey(channelID, postID, userID), mock.Anything, mock.Anything).Return(true, nil)
 
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
+	api.On("PublishWebSocketEvent", wsEventReceiptsChanged, mock.Anything, mock.Anything).Return()
 
 	body, _ := json.Marshal(readRequest{PostID: postID})
 	req := httptest.NewRequest("POST", "/api/v1/read", bytes.NewReader(body))

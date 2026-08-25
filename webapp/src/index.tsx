@@ -1,6 +1,6 @@
 import {isDesktopClient} from './desktop';
 import {reducer} from './reducer';
-import {handleWebSocketEvent, WS_EVENT} from './websocket';
+import {handleReceiptsChangedEvent, handleWebSocketEvent, WS_EVENT, WS_RECEIPTS_CHANGED_EVENT} from './websocket';
 import {PLUGIN_ID} from './client';
 import ReadReceipt from './components/read_receipt';
 import {setStore} from './store_ref';
@@ -31,6 +31,9 @@ export class ReadReceiptsPlugin {
         registry.registerWebSocketEventHandler(WS_EVENT, (msg) => {
             handleWebSocketEvent(msg, store, () => this.watcher?.refreshSoon());
         });
+        registry.registerWebSocketEventHandler(WS_RECEIPTS_CHANGED_EVENT, (msg) => {
+            handleReceiptsChangedEvent(msg, store, () => this.watcher?.refreshSoon());
+        });
 
         registry.registerPostMessageAttachmentComponent(ReadReceipt);
 
@@ -44,10 +47,13 @@ export class ReadReceiptsPlugin {
         if (typeof registry.registerReconnectHandler === 'function') {
             registry.registerReconnectHandler(() => {
                 // A reconnect is the point at which an administrator's change to
-                // the setting can have happened without this client hearing about
-                // it, so the configuration is re-read alongside the receipts.
-                loadPluginConfig(store);
-                this.watcher?.refresh();
+                // the setting can have happened. Clear the previous allow-list
+                // first; only a successful fresh response may wake the watcher.
+                void loadPluginConfig(store).then((loaded) => {
+                    if (loaded) {
+                        this.watcher?.refresh();
+                    }
+                });
             });
         }
 

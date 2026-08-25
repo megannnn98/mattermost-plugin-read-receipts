@@ -1,5 +1,5 @@
 import {ACTION_TYPES} from '../src/reducer';
-import {WS_EVENT, handleWebSocketEvent} from '../src/websocket';
+import {WS_EVENT, WS_RECEIPTS_CHANGED_EVENT, handleReceiptsChangedEvent, handleWebSocketEvent} from '../src/websocket';
 import {makeGlobalState} from './helpers';
 
 describe('handleWebSocketEvent', () => {
@@ -14,6 +14,7 @@ describe('handleWebSocketEvent', () => {
     });
 
     const event = (data: Record<string, unknown>) => ({event: WS_EVENT, data});
+    const changed = (data: Record<string, unknown>) => ({event: WS_RECEIPTS_CHANGED_EVENT, data});
 
     it('dispatches the receipt of a matching event', () => {
         handleWebSocketEvent(event({channel_id: 'dm1', post_id: 'p1', create_at: 100, read_at: 200, reader_id: 'reader'}), store, onCountChanged);
@@ -63,5 +64,40 @@ describe('handleWebSocketEvent', () => {
         store.getState.mockReturnValue(stateWith('G'));
         handleWebSocketEvent(event({channel_id: 'dm1', post_id: 'p1', reader_id: 'reader'}), store, onCountChanged);
         expect(onCountChanged).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('handleReceiptsChangedEvent', () => {
+    const currentChannelStore = () => ({
+        dispatch: jest.fn(),
+        getState: jest.fn().mockReturnValue(makeGlobalState({
+            currentChannelId: 'ch1',
+            channels: {ch1: {id: 'ch1', type: 'G'}, other: {id: 'other', type: 'D'}},
+        })),
+    });
+
+    it.each(['D', 'G', 'P', 'O'])('refreshes a current %s channel without receiving a reader identity', (type) => {
+        const store = currentChannelStore();
+        store.getState.mockReturnValue(makeGlobalState({
+            currentChannelId: 'ch1',
+            channels: {ch1: {id: 'ch1', type}},
+        }));
+        const refreshSoon = jest.fn();
+
+        handleReceiptsChangedEvent({event: WS_RECEIPTS_CHANGED_EVENT, data: {channel_id: 'ch1'}}, store, refreshSoon);
+
+        expect(refreshSoon).toHaveBeenCalledTimes(1);
+        expect(store.dispatch).not.toHaveBeenCalled();
+    });
+
+    it('ignores malformed, foreign and non-current channel invalidations', () => {
+        const store = currentChannelStore();
+        const refreshSoon = jest.fn();
+
+        handleReceiptsChangedEvent({event: WS_RECEIPTS_CHANGED_EVENT, data: {}}, store, refreshSoon);
+        handleReceiptsChangedEvent({event: WS_RECEIPTS_CHANGED_EVENT, data: {channel_id: 'other'}}, store, refreshSoon);
+        handleReceiptsChangedEvent({event: WS_EVENT, data: {channel_id: 'ch1'}}, store, refreshSoon);
+
+        expect(refreshSoon).not.toHaveBeenCalled();
     });
 });

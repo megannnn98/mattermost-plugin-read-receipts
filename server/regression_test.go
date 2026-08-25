@@ -225,6 +225,7 @@ func TestMarkAsRead_WatermarkKeepsFirstReceiptTimeAfterRetry(t *testing.T) {
 	p, api := setupTestPlugin(t)
 	wireKV(api, kv)
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
+	api.On("PublishWebSocketEvent", wsEventReceiptsChanged, mock.Anything, mock.Anything).Return()
 
 	readerID := validID("readerRetry")
 	channelID := validID("channelRetry")
@@ -445,6 +446,7 @@ func TestHandleRead_IgnoresUserIDInBody(t *testing.T) {
 	api.On("KVSetWithOptions", wmKey(channelID, attacker), mock.Anything, mock.Anything).Return(true, nil)
 	api.On("KVSetWithOptions", rrKey(channelID, postID, attacker), mock.Anything, mock.Anything).Return(true, nil)
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
+	api.On("PublishWebSocketEvent", wsEventReceiptsChanged, mock.Anything, mock.Anything).Return()
 
 	// The body tries to smuggle a different user id.
 	body := []byte(fmt.Sprintf(`{"post_id":"%s","user_id":"otheruser000000000000"}`, postID))
@@ -471,6 +473,7 @@ func TestMarkAsRead_FirstWriteWins(t *testing.T) {
 	post := &model.Post{Id: postID, UserId: validID("author"), ChannelId: channelID, CreateAt: 1000}
 	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
+	api.On("PublishWebSocketEvent", wsEventReceiptsChanged, mock.Anything, mock.Anything).Return()
 
 	first, err := p.markAsRead(readerID, post, channel)
 	require.NoError(t, err)
@@ -488,7 +491,7 @@ func TestMarkAsRead_FirstWriteWins(t *testing.T) {
 			wsCalls++
 		}
 	}
-	assert.Equal(t, 1, wsCalls, "only the first read publishes a WS event")
+	assert.Equal(t, 2, wsCalls, "only the first read publishes the targeted and channel invalidation events")
 }
 
 // --- The watermark is the authority on "already read" ------------------------
@@ -502,6 +505,7 @@ func TestMarkAsRead_ExpiredReceiptKeepsWatermarkTime(t *testing.T) {
 	p, api := setupTestPlugin(t)
 	wireKV(api, kv)
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
+	api.On("PublishWebSocketEvent", wsEventReceiptsChanged, mock.Anything, mock.Anything).Return()
 
 	readerID := validID("userR")
 	channelID := validID("chanTTL")
