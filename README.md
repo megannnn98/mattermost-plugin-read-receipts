@@ -28,7 +28,7 @@
   - cookie `MMCSRF`
   - `window.desktopAPI.getAppInfo` / `onUserActivityUpdate`
 - **PostHeader-слот** сознательно не используется (гейт `showPostHeaderBadge` скрывает его на consecutive-постах).
-- **Точное время** прочтения хранится `ReceiptRetentionDays` (по умолчанию 30) дней; для более старых постов остаётся факт прочтения (watermark) с приближённым временем.
+- **Точное время** прочтения хранится `ReceiptRetentionDays` (по умолчанию 30) дней; допустимый диапазон **1…3650**, значения ≤ 0 откатываются к дефолту (30), слишком большие клампятся к максимуму (3650); для старых постов остаётся факт прочтения (watermark) с приближённым временем.
 - Сообщения, прочитанные в браузере или на мобиле, receipt **не порождают** — это ожидаемое поведение.
 
 ## Build
@@ -41,6 +41,11 @@ make dist     # только сборка dist/*.tar.gz
 ```
 
 Результат: `dist/com.integrasources.read-receipts-0.1.0.tar.gz`
+
+Зависимости webapp ставятся воспроизводимо через `npm ci` (по lock-файлу). Для
+обновления зависимостей и перегенерации lock-файла — `make node-deps-update`
+(вызовет `npm install`). Сборка серверной части `make server` сама создаёт
+`server/dist`, так что `make clean && make server` безопасны.
 
 ## Install
 
@@ -70,17 +75,28 @@ make test          # go test -race ./... + tsc --noEmit + jest
 make check-style   # gofmt -l (fail при расхождении) + go vet + eslint
 ```
 
-Покрыто (server, `plugintest`-моки): создание receipt, повторный receipt (идемпотентность),
-watermark не откатывается назад, 401 без `Mattermost-User-Id`, 403 для постороннего пользователя,
-403 для автора собственного поста, 403 для не-DM канала, выдача данных только другого участника DM.
+Покрыто (server, `plugintest`-моки на fakeKV с настоящей CAS-семантикой): создание
+и повторный receipt (идемпотентность, first-write-wins), watermark не откатывается
+назад (монотонность под конкурентностью N горутин, `-race`), изоляция receipt между
+каналами (post из чужого DM не отдаётся), частичные сбои KV (запись receipt падает —
+watermark не тронут и 500; CAS watermark падает — 500 и без WS), 401 без
+`Mattermost-User-Id` (оба эндпоинта), 403 для постороннего пользователя / автора
+собственного поста / не-DM канала, identity только из заголовка (id в теле
+игнорируется), query-лимит (макс 200, невалидные id отбрасываются), битый JSON /
+пустой channel_id / тело больше лимита → 4xx, клампинг `ReceiptRetentionDays`
+(0, отрицательное, 1e9).
 
 Покрыто (webapp, jest): desktop-детект, reducer и селекторы, дедупликация, gating
 (чужой пост в открытом DM / свой пост / другой канал / не-DM / удалённый пост), channel watcher
 (загрузка при открытии, один раз на канал, переключение канала, ожидание постов, `refresh()`,
-`stop()`, порядок «новые первыми» при нескольких блоках), websocket-обработчик (совпадение события,
-приведение типов, игнор мусора), i18n, visibility-трекер, регистрация плагина через
-`window.registerPlugin`, компонент ReadReceipt (dwell при активном окне, отсутствие чтения без
-фокуса, перезапуск dwell при возврате фокуса/активности, отсутствие двойного отчёта).
+`stop()`, переключение канала во время in-flight запроса не теряется, порядок «новые первыми»),
+websocket-обработчик (совпадение события, приведение типов, игнор мусора, отбрасывание события
+с чужим `author_id`), i18n, visibility-трекер, `visibility_ratio` (низкий ratio → нет отправки,
+высокий → dwell, падение ниже порога во время dwell отменяет отправку, tall-post fallback по
+`intersectionRect.height`), `usePluginSelector` (селективность: нет rerender на нерелевантный
+action), локальное чтение не помечает свои посты прочитанными (нет dispatch, id в body игнорируется),
+компонент ReadReceipt (dwell, отсутствие чтения без фокуса, перезапуск dwell при возврате фокуса,
+отсутствие двойного отчёта, retry после сбоя сети с backoff, отмена retry на blur).
 
 Каждый регрессионный тест проверен мутацией: правка снимается — тест обязан упасть.
 
@@ -94,7 +110,7 @@ watermark не откатывается назад, 401 без `Mattermost-User-
 cd server && go test -race ./...
 
 # Webapp-тесты
-cd webapp && npm install && npm run test
+cd webapp && npm ci && npm run test
 
 # Typecheck и линт
 cd webapp && npm run typecheck && npm run lint
@@ -154,11 +170,17 @@ window.registerPlugin('com.integrasources.read-receipts', new ReadReceiptsPlugin
 
 **Watermark** (`wm_<channelID>_<readerID>`):
 - `{post_id, create_at, read_at}` — монотонный watermark, без TTL
-- Обновление: только если `new.create_at > old.create_at` (гонки и «прокрутка назад» не откатывают состояние)
+- Обновление атомарное, только если `new.create_at > old.create_at` (CAS, до 5 попыток) → гонки и «прокрутка назад» не откатывают состояние
 
-**Per-post receipt** (`rr_<postID>_<readerID>`):
+**Порядок записи при чтении**: сначала персистится per-post receipt, затем двигается watermark; WS-событие публикуется только после успеха обоих шагов и только если что-то реально изменилось (повторный POST не порождает ложных событий). Если запись receipt падает — watermark не тронут; если падает watermark — состояние консервативно (receipt есть, watermark отстаёт, повторный запрос чинит).
+
+**Per-post receipt** (`rr_<channelID>_<postID>_<readerID>`):
 - `read_at` (int64), `ExpireInSeconds = ReceiptRetentionDays*86400`
 - Запись только если ключа ещё нет (Atomic: true, OldValue: nil) → «first write wins», повторный read полностью идемпотентен
+- Ключ **скоуплен по каналу** (`channelID` всегда берётся из провалидированного `channel.Id`): receipt существует ⟺ `readerID` прочитал `postID` в `channelID`. Автор поста — всегда сам запрашивающий (само-чтение запрещено `ErrAuthorSelfRead`, DM всегда 1:1), поэтому передача `post_id` из чужого канала ничего не отдаёт: ключ не совпадёт. Это структурная гарантия без лишних `GetPost` на каждый id (до 200 вызовов на открытие DM были бы недопустимой просадкой).
+- **Миграции нет**: версия `0.1.0` не имеет публичных установок. Старые `rr_<postID>_<readerID>`-ключи имеют TTL и истекают сами в течение `ReceiptRetentionDays`; формат `wm_*` не меняется.
+
+**Водмарк — атомарный (CAS)**: обновление через `KVSetWithOptions{Atomic: true, OldValue: <прочитанные байты>}` в цикле (до 5 попыток). Это гарантирует «watermark никогда не движется назад» даже при конкурентных запросах (процессный lock не сработал бы — плагин может работать не в одном процессе).
 
 Ответ «прочитано?» для поста:
 - `post.create_at <= watermark.create_at` → прочитано
@@ -179,7 +201,7 @@ window.registerPlugin('com.integrasources.read-receipts', new ReadReceiptsPlugin
 - Вызывающий — участник канала (`HasPermissionToChannel(..., PermissionReadChannel)`)
 - Вызывающий ≠ автор поста
 
-Затем watermark + per-post запись; WS-событие публикуется только если watermark продвинулся.
+Затем (в таком порядке) пишется per-post receipt, после него — watermark; WS-событие публикуется только если оба шага прошли успешно и хотя бы один из них что-то изменил.
 
 **POST `/plugins/.../api/v1/receipts/query`**
 ```json
@@ -187,7 +209,7 @@ window.registerPlugin('com.integrasources.read-receipts', new ReadReceiptsPlugin
 ```
 → `{"watermark": {...} | null, "receipts": {"<post_id>": read_at}}`
 
-Возвращаются данные другого участника DM; вызывающий обязан быть участником, канал — D; `post_ids` ограничены (max 200).
+Возвращаются данные другого участника DM; вызывающий обязан быть участником, канал — D; `post_ids` ограничены (max 200, первый 200), мусорные/пустые id отбрасываются, невалидный id фильтруется до запроса в KV. Получаемые receipts читаются по ключам провалидированного `channel.Id` — посты, принадлежащие другому каналу, ничего не возвращают (изоляция каналов). Тело запроса и ответа ограничены (64 KiB), весь трафик идёт с `X-CSRF-Token`/`X-Requested-With`.
 
 ### WebSocket
 
@@ -203,11 +225,12 @@ window.registerPlugin('com.integrasources.read-receipts', new ReadReceiptsPlugin
   "post_id": "...",
   "create_at": 1234567890,
   "read_at": 1234567900,
-  "reader_id": "..."
+  "reader_id": "...",
+  "author_id": "..."
 }
 ```
 
-Никакой рассылки всем — только автору поста.
+Никакой рассылки всем — только автору поста. Клиент дополнительно отбрасывает событие, у которого `author_id` задан и не совпадает с текущим пользователем (защита от неверно адресованного broadcast).
 
 ### Загрузка сохранённых receipts (channel watcher)
 
@@ -228,9 +251,27 @@ polling'а:
 2. Канал поста == `currentChannelId` и тип канала D
 3. Окно активно: `document.visibilityState === 'visible'` и `document.hasFocus()`
 4. Пользователь не idle: `window.desktopAPI.onUserActivityUpdate((active) => ...)`
-5. Элемент поста реально виден: `IntersectionObserver` (threshold: 0.75)
+5. Элемент поста реально виден (см. «Семантика видимости» ниже)
 6. Dwell ≥ 1000 мс непрерывной видимости
 7. Дедупликация: локальный watermark `sentCreateAt[channelId]` + `Set` отправленных `post_id`
+
+### Семантика видимости
+
+Наблюдается не 1×1 sentinel, а ближайший реальный элемент поста
+(`.post` → `.post__body` → родитель sentinel'а). Пост считается видимым, если
+**либо** `intersectionRatio >= 0.75`, **либо** его видимая полоса закрывает ≥
+0.75 высоты вьюпорта (`intersectionRect.height >= rootBounds.height * 0.75`) —
+честная семантика для высоких постов, которые физически не помещаются во
+вьюпорт и никогда не дадут ratio 0.75. Колбэк вызывается на вход и на выход
+порога (`threshold: [0, 0.75]`).
+
+### Retry после сбоя сети
+
+Read — конечный автомат `idle → pending → sent`. Упавший запрос возвращается в
+`idle`, и через `RETRY_BACKOFF_MS = 5000` (без tight-loop) повторяется, если пост
+всё ещё достаточно видим и окно активно. Уход из видимости / blur/ idle во
+время dwell или backoff отменяет отправку. Только успешный ответ переводит
+состояние в `sent` — временная ошибка сети не теряет receipt навсегда.
 
 Отправляется один запрос на пост (обычно 1–2 при открытии канала); при пачке видимых постов отправляется только самый новый (остальные покрываются watermark'ом).
 
