@@ -2,7 +2,7 @@ import React, {useEffect, useRef} from 'react';
 import {createPortal} from 'react-dom';
 
 import {formatReadTime, SupportedLocale, t} from '../i18n';
-import {ReaderRead} from '../types';
+import {MMUserProfile, ReaderRead} from '../types';
 
 export const POPOVER_MAX_ROWS = 20;
 
@@ -13,17 +13,18 @@ interface ReadersPopoverProps {
     readers: ReaderRead[];
     status: ReadersStatus;
     truncated: boolean;
-    profiles: Record<string, {username?: string; first_name?: string; last_name?: string}>;
+    nameOf: (userId: string) => MMUserProfile | undefined;
     locale: SupportedLocale;
+    onLoadMore?: () => void;
     onClose: () => void;
 }
 
-function profileName(profile: {username?: string; first_name?: string; last_name?: string} | undefined, userId: string): string {
+function profileName(profile: MMUserProfile | undefined, userId: string): string {
     const fullName = [profile?.first_name, profile?.last_name].filter(Boolean).join(' ');
     return fullName || profile?.username || userId;
 }
 
-export const ReadersPopover: React.FC<ReadersPopoverProps> = ({anchor, readers, status, truncated, profiles, locale, onClose}) => {
+export const ReadersPopover: React.FC<ReadersPopoverProps> = ({anchor, readers, status, truncated, nameOf, locale, onLoadMore, onClose}) => {
     const ref = useRef<HTMLDivElement>(null);
     const rect = anchor.getBoundingClientRect();
     const estimatedHeight = Math.min(readers.length, POPOVER_MAX_ROWS) * 24 + 48;
@@ -50,9 +51,18 @@ export const ReadersPopover: React.FC<ReadersPopoverProps> = ({anchor, readers, 
     const content = <div ref={ref} role='dialog' tabIndex={-1} style={{position: 'fixed', top, left: rect.left, zIndex: 1000, lineHeight: 'normal', fontSize: '0.8125rem', background: 'var(--center-channel-bg)', padding: 8, boxShadow: '0 2px 8px #0004'}}>
         <strong>{t(locale, 'readBy')}</strong>
         {status !== 'ready' && <div>{t(locale, status === 'loading' ? 'readLoading' : 'readError')}</div>}
-        {shown.map((reader) => <div key={reader.user_id}>{profileName(profiles[reader.user_id], reader.user_id)} · {reader.exact ? formatReadTime(reader.read_at, locale) : t(locale, 'readApprox', {time: formatReadTime(reader.read_at, locale)})}</div>)}
+        {shown.map((reader) => <div key={reader.user_id}>{profileName(nameOf(reader.user_id), reader.user_id)} · {reader.exact ? formatReadTime(reader.read_at, locale) : t(locale, 'readApprox', {time: formatReadTime(reader.read_at, locale)})}</div>)}
         {remaining > 0 && <div>{t(locale, 'readMore', {count: String(remaining)})}</div>}
         {truncated && <div>{t(locale, 'readMoreTruncated', {count: String(readers.length)})}</div>}
+        {truncated && onLoadMore && (
+            <button
+                type='button'
+                onClick={onLoadMore}
+                style={{border: 0, background: 'none', padding: 0, color: 'var(--link-color, #386fe5)', cursor: 'pointer'}}
+            >
+                {t(locale, 'readLoadMore')}
+            </button>
+        )}
     </div>;
     return createPortal(content, document.body);
 };

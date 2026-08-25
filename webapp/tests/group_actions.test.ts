@@ -1,4 +1,4 @@
-import {loadChannelReceipts, loadPostReaders, resetDeduplicator, sendReadReceipt} from '../src/actions';
+import {loadChannelReceipts, loadPluginConfig, loadPostReaders, resetDeduplicator, sendReadReceipt} from '../src/actions';
 import {ACTION_TYPES} from '../src/reducer';
 import * as client from '../src/client';
 import {RequestError} from '../src/client';
@@ -14,6 +14,7 @@ jest.mock('../src/client', () => {
         RequestError: MockRequestError,
         fetchChannelReceipts: jest.fn(),
         fetchPostReaders: jest.fn(),
+        fetchPluginConfig: jest.fn(),
         fetchUsersByIds: jest.fn(),
         reportRead: jest.fn(),
     };
@@ -23,6 +24,7 @@ const mockedReportRead = client.reportRead as jest.MockedFunction<typeof client.
 const mockedQuery = client.fetchChannelReceipts as jest.MockedFunction<typeof client.fetchChannelReceipts>;
 const mockedPostReaders = client.fetchPostReaders as jest.MockedFunction<typeof client.fetchPostReaders>;
 const mockedUsers = client.fetchUsersByIds as jest.MockedFunction<typeof client.fetchUsersByIds>;
+const mockedConfig = client.fetchPluginConfig as jest.MockedFunction<typeof client.fetchPluginConfig>;
 
 const PLUGIN_BRANCH = 'plugins-com.integrasources.read-receipts';
 
@@ -88,7 +90,7 @@ describe('loadPostReaders', () => {
 
         expect(store.dispatch).toHaveBeenCalledWith({
             type: ACTION_TYPES.POST_READERS,
-            data: {postId: 'p1', readers: expect.any(Array), truncated: false},
+            data: {postId: 'p1', readers: expect.any(Array), truncated: false, nextOffset: 0, append: false},
         });
         // Both the webapp's own profiles and the ones this plugin already fetched
         // count as known, otherwise every popover open refetches the same users.
@@ -103,6 +105,7 @@ describe('loadPostReaders', () => {
         mockedPostReaders.mockResolvedValue({
             readers: [{user_id: 'known', read_at: 1000, exact: true}],
             truncated: true,
+            next_offset: 200,
         });
 
         const store = makeStore({known: {username: 'known'}});
@@ -110,5 +113,44 @@ describe('loadPostReaders', () => {
 
         expect(mockedUsers).not.toHaveBeenCalled();
         expect(store.dispatch).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('paging the reader list', () => {
+    it('continues a truncated list instead of restarting it', async () => {
+        mockedPostReaders.mockResolvedValue({
+            readers: [{user_id: 'known', read_at: 1300, exact: true}],
+            truncated: false,
+        });
+
+        const store = makeStore({known: {username: 'known'}});
+        await loadPostReaders(store, 'p1', 200);
+
+        expect(mockedPostReaders).toHaveBeenCalledWith('p1', 200);
+        expect(store.dispatch).toHaveBeenCalledWith({
+            type: ACTION_TYPES.POST_READERS,
+            data: {postId: 'p1', readers: expect.any(Array), truncated: false, nextOffset: 0, append: true},
+        });
+    });
+});
+
+describe('loadPluginConfig', () => {
+    it('stores the channel types the server reported', async () => {
+        mockedConfig.mockResolvedValue({enabled_channel_types: 'DG'});
+        const store = makeStore();
+
+        expect(await loadPluginConfig(store)).toBe(true);
+        expect(store.dispatch).toHaveBeenCalledWith({
+            type: ACTION_TYPES.CONFIG,
+            data: {config: {enabled_channel_types: 'DG'}},
+        });
+    });
+
+    it('leaves the configuration unknown when it cannot be fetched', async () => {
+        mockedConfig.mockRejectedValue(new RequestError(500, 'boom'));
+        const store = makeStore();
+
+        expect(await loadPluginConfig(store)).toBe(false);
+        expect(store.dispatch).not.toHaveBeenCalled();
     });
 });

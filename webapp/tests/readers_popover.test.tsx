@@ -32,8 +32,9 @@ describe('ReadersPopover', () => {
     function render(
         readers: ReturnType<typeof makeReaders>,
         truncated = false,
-        profiles = {},
+        profiles: Record<string, {username?: string; first_name?: string; last_name?: string}> = {},
         status: ReadersStatus = 'ready',
+        onLoadMore?: () => void,
     ) {
         act(() => root.render(
             <ReadersPopover
@@ -41,8 +42,9 @@ describe('ReadersPopover', () => {
                 readers={readers}
                 status={status}
                 truncated={truncated}
-                profiles={profiles}
+                nameOf={(userId) => profiles[userId]}
                 locale='ru'
+                onLoadMore={onLoadMore}
                 onClose={onClose}
             />,
         ));
@@ -154,5 +156,20 @@ describe('ReadersPopover', () => {
             document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}));
         });
         expect(onClose).toHaveBeenCalled();
+    });
+    it('offers to load the rest of a truncated list rather than stopping at the first page', () => {
+        const onLoadMore = jest.fn();
+        render(makeReaders(3), true, {}, 'ready', onLoadMore);
+
+        const more = Array.from(dialog().querySelectorAll('button')).find((b) => b.textContent?.includes('Показать ещё'));
+        expect(more).toBeDefined();
+
+        act(() => more!.click());
+        expect(onLoadMore).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not offer more when there is nothing further to load', () => {
+        render(makeReaders(3), false, {}, 'ready');
+        expect(dialog().textContent).not.toContain('Показать ещё');
     });
 });

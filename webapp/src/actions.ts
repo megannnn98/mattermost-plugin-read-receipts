@@ -1,4 +1,4 @@
-import {fetchChannelReceipts, fetchPostReaders, fetchUsersByIds, PLUGIN_ID, reportRead, RequestError} from './client';
+import {PLUGIN_ID, fetchChannelReceipts, fetchPluginConfig, fetchPostReaders, fetchUsersByIds, reportRead, RequestError} from './client';
 import {ACTION_TYPES} from './reducer';
 import {PluginStore} from './types';
 
@@ -71,8 +71,8 @@ export async function loadChannelReceipts(
             type: ACTION_TYPES.RECEIPTS_QUERY,
             data: {
                 channelId,
-                watermarks: response.watermarks,
-                receipts: response.receipts,
+                posts: response.posts,
+                truncated: response.truncated,
             },
         });
         return true;
@@ -109,14 +109,28 @@ export async function sendReadReceipt(
     }
 }
 
-export async function loadPostReaders(store: PluginStore, postId: string): Promise<void> {
-    const response = await fetchPostReaders(postId);
-    store.dispatch({type: ACTION_TYPES.POST_READERS, data: {postId, readers: response.readers, truncated: response.truncated}});
+/**
+ * Loads one page of the reader list of a post, plus the profiles needed to name
+ * the people in it. `offset` continues a truncated list rather than restarting it.
+ */
+export async function loadPostReaders(store: PluginStore, postId: string, offset = 0): Promise<void> {
+    const response = await fetchPostReaders(postId, offset);
+    store.dispatch({
+        type: ACTION_TYPES.POST_READERS,
+        data: {
+            postId,
+            readers: response.readers,
+            truncated: response.truncated,
+            nextOffset: response.next_offset ?? 0,
+            append: offset > 0,
+        },
+    });
 
     const state = store.getState();
+    const pluginBranch = state[`plugins-${PLUGIN_ID}`] as {profiles?: Record<string, unknown>} | undefined;
     const known = {
         ...(state.entities?.users?.profiles ?? {}),
-        ...((state[`plugins-${PLUGIN_ID}`] as {profiles?: Record<string, unknown>} | undefined)?.profiles ?? {}),
+        ...(pluginBranch?.profiles ?? {}),
     };
     const missing = response.readers.map((reader) => reader.user_id).filter((userId) => !known[userId]);
     if (missing.length === 0) {
@@ -127,4 +141,20 @@ export async function loadPostReaders(store: PluginStore, postId: string): Promi
         type: ACTION_TYPES.PROFILES,
         data: {profiles: Object.fromEntries(profiles.map((profile) => [profile.id, profile]))},
     });
+}
+
+/**
+ * Loads the channel types the server collects receipts for. Until this lands the
+ * plugin stays inert, so a type an administrator disabled never gets an indicator
+ * or a read report — rather than being discovered from a 403 after the fact.
+ */
+export async function loadPluginConfig(store: PluginStore): Promise<boolean> {
+    try {
+        const config = await fetchPluginConfig();
+        store.dispatch({type: ACTION_TYPES.CONFIG, data: {config}});
+        return true;
+    } catch (error) {
+        console.error(`[${PLUGIN_ID}] Failed to load plugin configuration:`, error);
+        return false;
+    }
 }
