@@ -60,13 +60,17 @@ export interface ChannelWatcher {
  */
 export function startChannelWatcher(store: PluginStore): ChannelWatcher {
     let handledChannelId: string | null = null;
-    let inFlight = false;
+    let inFlightChannelId: string | null = null;
+    let refreshRequested = false;
 
     const check = () => {
         const state = store.getState();
         const channelId = state?.entities?.channels?.currentChannelId;
 
-        if (!channelId || channelId === handledChannelId || inFlight) {
+        // No channel yet, already handled, or a query is mid-flight. In the
+        // in-flight case `done()` re-runs check unconditionally, so a channel
+        // switch that happened while the query was pending is picked up then.
+        if (!channelId || channelId === handledChannelId || inFlightChannelId !== null) {
             return;
         }
 
@@ -86,10 +90,17 @@ export function startChannelWatcher(store: PluginStore): ChannelWatcher {
             return;
         }
 
-        inFlight = true;
+        inFlightChannelId = channelId;
         const done = () => {
-            inFlight = false;
-            handledChannelId = channelId;
+            inFlightChannelId = null;
+            if (!refreshRequested) {
+                handledChannelId = channelId;
+            }
+            refreshRequested = false;
+            // Unconditional re-check: if the user switched to another channel
+            // while this query was pending, load it now. Without this the
+            // switch would be lost and channel B might never load.
+            check();
         };
         loadChannelReceipts(store, channelId, postIds).then(done, done);
     };
@@ -100,6 +111,13 @@ export function startChannelWatcher(store: PluginStore): ChannelWatcher {
     return {
         stop: () => unsubscribe(),
         refresh: () => {
+            // If a query is in flight, mark that the current channel must be
+            // reloaded once it finishes (its done() re-checks unconditionally).
+            // If idle, resetting handledChannelId below is enough to trigger a
+            // fresh load.
+            if (inFlightChannelId !== null) {
+                refreshRequested = true;
+            }
             handledChannelId = null;
             check();
         },

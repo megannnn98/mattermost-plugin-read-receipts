@@ -250,6 +250,42 @@ describe('startChannelWatcher', () => {
         watcher.stop();
     });
 
+    it('does not lose a channel switch that happens while a query is in flight', async () => {
+        // A deferred promise keeps DM A's query pending so we can switch to B
+        // while it is mid-flight.
+        const state = makeState();
+        const store = makeStore(state);
+        let resolveA: (v: client.QueryResponse) => void = () => undefined;
+        mockedFetch.mockImplementation((channelId: string) => {
+            if (channelId === 'dm1') {
+                return new Promise((resolve) => {
+                    resolveA = (v) => resolve(v);
+                });
+            }
+            return Promise.resolve({watermark: null, receipts: {}});
+        });
+
+        const watcher = startChannelWatcher(store);
+        await flush();
+        // DM A's query is still pending.
+        expect(mockedFetch).toHaveBeenCalledWith('dm1', ['p4', 'p1']);
+        expect(mockedFetch).toHaveBeenCalledTimes(1);
+
+        // Switch to DM B while A is still in flight; the watcher must not lose it.
+        state.entities.channels.currentChannelId = 'dm2';
+        store.notify();
+        await flush();
+        expect(mockedFetch).toHaveBeenCalledTimes(1); // not loaded prematurely
+
+        // Once A's query completes, the watcher must automatically load B.
+        resolveA({watermark: null, receipts: {}});
+        await flush();
+        await flush();
+
+        expect(mockedFetch).toHaveBeenNthCalledWith(2, 'dm2', ['q1']);
+        watcher.stop();
+    });
+
     it('stop() unsubscribes from the store', async () => {
         const store = makeStore(makeState());
         const watcher = startChannelWatcher(store);
