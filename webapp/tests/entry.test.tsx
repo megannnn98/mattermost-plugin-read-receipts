@@ -3,7 +3,7 @@ import {WS_EVENT} from '../src/websocket';
 
 jest.mock('../src/client', () => ({
     PLUGIN_ID: 'com.integrasources.read-receipts',
-    fetchChannelReceipts: jest.fn().mockResolvedValue({watermark: null, receipts: {}, debug: false}),
+    fetchChannelReceipts: jest.fn().mockResolvedValue({watermark: null, receipts: {}}),
     reportRead: jest.fn(),
 }));
 

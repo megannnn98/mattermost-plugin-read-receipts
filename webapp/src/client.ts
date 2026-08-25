@@ -45,7 +45,6 @@ export interface QueryResponse {
         read_at: number;
     } | null;
     receipts: Record<string, number>;
-    debug: boolean;
 }
 
 export async function reportRead(postId: string): Promise<ReadResponse> {

@@ -14,7 +14,6 @@ export interface Watermark {
 export interface PluginState {
     watermarks: Record<string, Watermark>;
     receipts: Record<string, number>;
-    debug: boolean;
 }
 
 export interface MMPost {

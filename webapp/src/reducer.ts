@@ -6,7 +6,6 @@ export type {PluginState, Watermark} from './types';
 const initialState: PluginState = {
     watermarks: {},
     receipts: {},
-    debug: false,
 };
 
 export const ACTION_TYPES = {
@@ -18,7 +17,6 @@ type QueryActionData = {
     channelId: string;
     watermark?: Watermark;
     receipts?: Record<string, number>;
-    debug?: boolean;
 };
 
 type WSReceiptActionData = {
@@ -34,7 +32,7 @@ export function reducer(
 ): PluginState {
     switch (action.type) {
         case ACTION_TYPES.RECEIPTS_QUERY: {
-            const {channelId, watermark, receipts = {}, debug} = (action.data ?? {}) as QueryActionData;
+            const {channelId, watermark, receipts = {}} = (action.data ?? {}) as QueryActionData;
             const newWatermarks = {...state.watermarks};
             if (watermark) {
                 const existing = newWatermarks[channelId];
@@ -46,7 +44,6 @@ export function reducer(
                 ...state,
                 watermarks: newWatermarks,
                 receipts: {...state.receipts, ...receipts},
-                debug: debug ?? state.debug,
             };
         }
 

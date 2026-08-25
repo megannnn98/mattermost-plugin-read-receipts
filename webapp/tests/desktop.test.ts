@@ -1,8 +1,7 @@
-import {isDesktopClient, resetDesktopCache} from '../src/desktop';
+import {isDesktopClient} from '../src/desktop';
 
 describe('desktop detection', () => {
     beforeEach(() => {
-        resetDesktopCache();
         delete (window as any).desktopAPI;
     });
 

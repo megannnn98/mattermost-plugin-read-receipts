@@ -5,7 +5,6 @@ describe('selectors', () => {
         'plugins-com.integrasources.read-receipts': {
             watermarks: {},
             receipts: {},
-            debug: false,
             ...overrides,
         },
     });

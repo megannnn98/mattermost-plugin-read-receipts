@@ -4,7 +4,6 @@ import {PLUGIN_ID} from './client';
 const emptyPluginState: PluginState = {
     watermarks: {},
     receipts: {},
-    debug: false,
 };
 
 export function selectPluginState(state: GlobalState): PluginState {

@@ -7,7 +7,6 @@ describe('reducer', () => {
         expect(state).toEqual({
             watermarks: {},
             receipts: {},
-            debug: false,
         });
     });
 
@@ -27,7 +26,6 @@ describe('reducer', () => {
                     read_at: 2000,
                 },
                 receipts: {p1: 2000},
-                debug: false,
             },
         });
 
@@ -46,7 +44,6 @@ describe('reducer', () => {
                 channelId: 'ch1',
                 watermark: {post_id: 'p1', create_at: 1000, read_at: 2000},
                 receipts: {},
-                debug: false,
             },
         });
 
@@ -56,7 +53,6 @@ describe('reducer', () => {
                 channelId: 'ch1',
                 watermark: {post_id: 'p2', create_at: 500, read_at: 1500},
                 receipts: {},
-                debug: false,
             },
         });
 

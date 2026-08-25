@@ -73,7 +73,6 @@ export async function loadChannelReceipts(
                 channelId,
                 watermark: response.watermark,
                 receipts: response.receipts,
-                debug: response.debug,
             },
         });
     } catch (error) {

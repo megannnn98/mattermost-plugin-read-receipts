@@ -14,7 +14,6 @@ const (
 	kvPrefixWM     = "wm_"
 	kvPrefixRR     = "rr_"
 	maxQueryIDs    = 200
-	dwellMs        = 1000
 )
 
 type Plugin struct {

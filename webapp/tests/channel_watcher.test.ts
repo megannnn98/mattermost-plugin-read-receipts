@@ -168,7 +168,7 @@ describe('isDirectChannel', () => {
 describe('startChannelWatcher', () => {
     beforeEach(() => {
         mockedFetch.mockReset();
-        mockedFetch.mockResolvedValue({watermark: null, receipts: {}, debug: false});
+        mockedFetch.mockResolvedValue({watermark: null, receipts: {}});
     });
 
     it('loads receipts for the DM that is open at startup', async () => {
