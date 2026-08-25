@@ -50,10 +50,6 @@ interface ReadReceiptProps {
 
 export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
     const sentinelRef = useRef<HTMLSpanElement>(null);
-    const dwellTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const lastSufficientlyVisibleRef = useRef(false);
-    const statusRef = useRef<SendStatus>('idle');
 
     const store = getStore();
 
@@ -70,6 +66,10 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
 
     useEffect(() => {
         let disposed = false;
+        let status: SendStatus = 'idle';
+        let dwellTimer: ReturnType<typeof setTimeout> | null = null;
+        let retryTimer: ReturnType<typeof setTimeout> | null = null;
+        let sufficientlyVisible = false;
         if (!store) {
             return;
         }
@@ -84,20 +84,20 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         }
 
         const clearDwell = () => {
-            if (dwellTimerRef.current) {
-                clearTimeout(dwellTimerRef.current);
-                dwellTimerRef.current = null;
+            if (dwellTimer) {
+                clearTimeout(dwellTimer);
+                dwellTimer = null;
             }
         };
 
         const clearRetry = () => {
-            if (retryTimerRef.current) {
-                clearTimeout(retryTimerRef.current);
-                retryTimerRef.current = null;
+            if (retryTimer) {
+                clearTimeout(retryTimer);
+                retryTimer = null;
             }
         };
 
-        const canReport = () => statusRef.current !== 'sent' && statusRef.current !== 'pending';
+        const canReport = () => status !== 'sent' && status !== 'pending';
 
         const attemptSend = () => {
             if (!canReport()) {
@@ -115,21 +115,21 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
                 return;
             }
 
-            statusRef.current = 'pending';
+            status = 'pending';
             sendReadReceipt(current.channelId, postId, current.createAt).then((ok) => {
                 if (disposed) {
                     return;
                 }
                 if (ok) {
-                    statusRef.current = 'sent';
+                    status = 'sent';
                     return;
                 }
                 // The request failed — go back to idle so a later attempt can
                 // retry, and schedule one automatically after a backoff.
-                statusRef.current = 'idle';
-                retryTimerRef.current = setTimeout(() => {
-                    retryTimerRef.current = null;
-                    if (canReport() && lastSufficientlyVisibleRef.current && tracker.isActive()) {
+                status = 'idle';
+                retryTimer = setTimeout(() => {
+                    retryTimer = null;
+                    if (canReport() && sufficientlyVisible && tracker.isActive()) {
                         attemptSend();
                     }
                 }, RETRY_BACKOFF_MS);
@@ -137,11 +137,11 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         };
 
         const startDwell = () => {
-            if (!canReport() || dwellTimerRef.current) {
+            if (!canReport() || dwellTimer) {
                 return;
             }
-            dwellTimerRef.current = setTimeout(() => {
-                dwellTimerRef.current = null;
+            dwellTimer = setTimeout(() => {
+                dwellTimer = null;
                 attemptSend();
             }, DWELL_MS);
         };
@@ -149,17 +149,17 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         const observer = new IntersectionObserver((entries) => {
             for (const entry of entries) {
                 const visible = isSufficientlyVisible(entry, VISIBILITY_THRESHOLD);
-                lastSufficientlyVisibleRef.current = visible;
-                if (!visible || !tracker.isActive() || statusRef.current === 'pending') {
+                sufficientlyVisible = visible;
+                if (!visible || !tracker.isActive() || status === 'pending') {
                     // Leaving view, an inactive window, or a request in flight
                     // cancels any pending dwell/backoff (unless already sent).
                     clearDwell();
-                    if (statusRef.current !== 'sent') {
+                    if (status !== 'sent') {
                         clearRetry();
                     }
                     continue;
                 }
-                if (statusRef.current === 'idle') {
+                if (status === 'idle') {
                     startDwell();
                 }
             }
@@ -174,7 +174,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
             if (!active) {
                 // Blur/hidden/idle cancels any pending dwell or retry backoff.
                 clearDwell();
-                if (statusRef.current !== 'sent') {
+                if (status !== 'sent') {
                     clearRetry();
                 }
                 return;
@@ -182,7 +182,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
             // The window became active again (focus/visibility/idle). No new
             // IntersectionObserver callback fires for a post that is already
             // visible, so restart the dwell from the last known visibility.
-            if (lastSufficientlyVisibleRef.current && statusRef.current === 'idle') {
+            if (sufficientlyVisible && status === 'idle') {
                 startDwell();
             }
         };
@@ -195,7 +195,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
             unsubTracker();
             clearDwell();
             clearRetry();
-            lastSufficientlyVisibleRef.current = false;
+            sufficientlyVisible = false;
         };
         // `isDM` is a dependency on purpose: while the channel entity is not in
         // the store yet the component renders nothing, so there is no sentinel

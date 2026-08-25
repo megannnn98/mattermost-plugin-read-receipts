@@ -87,6 +87,7 @@ function makeState() {
             posts: {
                 posts: {
                     p1: {id: 'p1', user_id: 'other', channel_id: 'channel1', create_at: 1000},
+                    p2: {id: 'p2', user_id: 'other', channel_id: 'channel1', create_at: 2000},
                 },
             },
         },
@@ -336,6 +337,49 @@ describe('ReadReceipt component', () => {
         act(() => (getVisibilityTracker() as any)._set({isFocused: false}));
         act(() => jest.advanceTimersByTime(6000));
         expect(mSend).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not let a pending send for one post block the reused component for another', async () => {
+        let resolveFirstSend: (ok: boolean) => void = () => undefined;
+        const mSend = sendReadReceipt as jest.Mock;
+        mSend
+            .mockImplementationOnce(() => new Promise<boolean>((resolve) => {
+                resolveFirstSend = resolve;
+            }))
+            .mockResolvedValueOnce(true);
+
+        act(() => root.render(<ReadReceipt postId="p1"/>));
+        fireIntersecting(true);
+        act(() => jest.advanceTimersByTime(1000));
+        expect(mSend).toHaveBeenCalledWith('channel1', 'p1', 1000);
+
+        act(() => root.render(<ReadReceipt postId="p2"/>));
+        fireIntersecting(true);
+        act(() => jest.advanceTimersByTime(1000));
+        await flushMicrotasks();
+        expect(mSend).toHaveBeenCalledWith('channel1', 'p2', 2000);
+
+        await act(async () => resolveFirstSend(false));
+        expect(mSend).toHaveBeenCalledTimes(2);
+
+        act(() => root.unmount());
+        expect(jest.getTimerCount()).toBe(0);
+    });
+
+    it('does not let a sent post block the reused component for another', async () => {
+        const mSend = sendReadReceipt as jest.Mock;
+
+        act(() => root.render(<ReadReceipt postId="p1"/>));
+        fireIntersecting(true);
+        act(() => jest.advanceTimersByTime(1000));
+        await flushMicrotasks();
+        expect(mSend).toHaveBeenCalledWith('channel1', 'p1', 1000);
+
+        act(() => root.render(<ReadReceipt postId="p2"/>));
+        fireIntersecting(true);
+        act(() => jest.advanceTimersByTime(1000));
+        await flushMicrotasks();
+        expect(mSend).toHaveBeenCalledWith('channel1', 'p2', 2000);
     });
 
     it.each([false, true])('ignores a pending send result after unmount (%s)', async (result) => {
