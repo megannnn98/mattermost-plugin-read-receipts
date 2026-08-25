@@ -1,4 +1,4 @@
-import React, {useEffect, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {createPortal} from 'react-dom';
 
 import {loadPostReaders, sendReadReceipt} from '../actions';
@@ -9,7 +9,7 @@ import {formatReadTime, getLocaleFromState, t, SupportedLocale} from '../i18n';
 import {usePluginSelector} from '../hooks';
 import {getPostContext, shouldReportRead} from '../gating';
 import {selectPostReadCount, selectSingleReaderReadAt, selectPluginState} from '../selectors';
-import {createInlineMount} from '../inline_mount';
+import {createInlineMount, InlineMount} from '../inline_mount';
 import {ReadersPopover, ReadersStatus} from './readers_popover';
 import {GlobalState} from '../types';
 import {
@@ -38,6 +38,24 @@ const isDMChannel = (state: GlobalState, postId: string): boolean => {
 
 const isEligibleChannel = (state: GlobalState, postId: string): boolean => Boolean(getPostContext(state, postId)?.isEligibleChannel);
 
+/**
+ * A key that changes exactly when Mattermost rebuilds the rendered message.
+ *
+ * The indicator lives in a node appended into React-owned DOM, so an edit or a
+ * reaction re-renders the message and throws that node away — measured in a real
+ * client, where the checkmark disappeared until a full reload. This component is
+ * a sibling of the message, so nothing would tell it to re-attach; selecting the
+ * fields that drive that re-render is what makes it notice.
+ */
+const selectRenderKey = (state: GlobalState, postId: string): string => {
+    const post = state?.entities?.posts?.posts?.[postId];
+    const reactions = (state?.entities?.posts as {reactions?: Record<string, Record<string, unknown>>} | undefined)?.reactions?.[postId];
+    if (!post) {
+        return '';
+    }
+    return `${post.update_at ?? 0}|${post.edit_at ?? 0}|${reactions ? Object.keys(reactions).length : 0}`;
+};
+
 const selectReadAt = (state: GlobalState, postId: string): number | null => {
     const ctx = getPostContext(state, postId);
     if (!ctx || !ctx.isOwn) {
@@ -46,10 +64,24 @@ const selectReadAt = (state: GlobalState, postId: string): number | null => {
     return selectSingleReaderReadAt(state, postId, ctx.createAt, ctx.channelId);
 };
 
-const isEqualDisplay = (
-    a: {isOwn: boolean; isDM: boolean; eligible: boolean; readAt: number | null; count: number; readers: unknown},
-    b: {isOwn: boolean; isDM: boolean; eligible: boolean; readAt: number | null; count: number; readers: unknown},
-): boolean => a.isOwn === b.isOwn && a.isDM === b.isDM && a.eligible === b.eligible && a.readAt === b.readAt && a.count === b.count && a.readers === b.readers;
+type Display = {
+    isOwn: boolean;
+    isDM: boolean;
+    eligible: boolean;
+    readAt: number | null;
+    count: number;
+    renderKey: string;
+    readers: unknown;
+};
+
+const isEqualDisplay = (a: Display, b: Display): boolean =>
+    a.isOwn === b.isOwn &&
+    a.isDM === b.isDM &&
+    a.eligible === b.eligible &&
+    a.readAt === b.readAt &&
+    a.count === b.count &&
+    a.renderKey === b.renderKey &&
+    a.readers === b.readers;
 
 interface ReadReceiptProps {
     postId: string;
@@ -66,14 +98,21 @@ function selectReadCount(state: GlobalState, postId: string): number {
 
 export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
     const sentinelRef = useRef<HTMLSpanElement>(null);
-    const buttonRef = useRef<HTMLButtonElement>(null);
+    const mountRef = useRef<InlineMount | null>(null);
+    // A callback ref, not a plain one: the popover needs the anchor *during*
+    // render, and a plain ref read there is stale for one render after the
+    // portal is re-created — the click that opened the popover then rendered
+    // nothing at all. Storing the node in state guarantees a render with it.
+    const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
+    const anchorRef = useCallback((node: HTMLButtonElement | null) => setAnchor(node), []);
     const [inlineTarget, setInlineTarget] = useState<HTMLElement | null>(null);
     const [popoverOpen, setPopoverOpen] = useState(false);
     const [readersFailed, setReadersFailed] = useState(false);
+    const [remounts, setRemounts] = useState(0);
 
     const store = getStore();
 
-    const {isOwn, isDM, eligible, readAt, count} = usePluginSelector(
+    const {isOwn, isDM, eligible, readAt, count, renderKey} = usePluginSelector(
         store,
         (state) => ({
             isOwn: isOwnPost(state, postId),
@@ -81,6 +120,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
             eligible: isEligibleChannel(state, postId),
             readAt: selectReadAt(state, postId),
             count: selectReadCount(state, postId),
+            renderKey: selectRenderKey(state, postId),
             readers: selectPluginState(state).readers[postId],
         }),
         isEqualDisplay,
@@ -88,11 +128,35 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
     const locale = usePluginSelector<SupportedLocale>(store, (state) => getLocaleFromState(state));
 
     useEffect(() => {
-        if (!isOwn || count === 0 || !sentinelRef.current) return undefined;
+        if (!isOwn || count === 0 || !sentinelRef.current) {
+            return undefined;
+        }
         const mount = createInlineMount(sentinelRef.current);
+        mountRef.current = mount;
         setInlineTarget(mount?.target ?? null);
-        return () => { mount?.dispose(); setInlineTarget(null); };
-    }, [isOwn, count]);
+        return () => {
+            mount?.dispose();
+            mountRef.current = null;
+            setInlineTarget(null);
+        };
+        // `renderKey` and `remounts` are dependencies on purpose: the first
+        // re-runs the mount when Mattermost rebuilt the message around our node,
+        // the second when the check below found the node already detached.
+    }, [isOwn, count, renderKey, remounts]);
+
+    // Runs after every render and costs one `isConnected` read. A detached target
+    // means React dropped our node while rendering something else; bumping the
+    // counter re-runs the mount above. When the node is still attached this is a
+    // no-op, so there is no render loop and no observer or polling involved.
+    //
+    // It reads the ref, not the state: in the commit where the mount above just
+    // re-attached, the rendered `inlineTarget` is still the previous, detached
+    // node, and comparing against it would bump the counter forever.
+    useEffect(() => {
+        if (mountRef.current && !mountRef.current.target.isConnected) {
+            setRemounts((n) => n + 1);
+        }
+    });
 
     useEffect(() => {
         let disposed = false;
@@ -286,7 +350,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         </span>
     ) : (
         <button
-            ref={buttonRef}
+            ref={anchorRef}
             type='button'
             onClick={openPopover}
             aria-label={t(locale, 'readCount', {count: String(count)})}
@@ -298,12 +362,29 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
 
     const portal = (
         <>
-            <span style={{opacity: 0.56, fontSize: '0.75rem', marginLeft: 4, whiteSpace: 'nowrap', verticalAlign: 'baseline'}}>
+            {/*
+              * `lineHeight: 0` is load-bearing, not cosmetic. A smaller font with
+              * a normal line-height still builds an inline box whose half-leading
+              * hangs below the paragraph's strut, and measuring a real client
+              * showed the post growing by 2px the moment the indicator appeared.
+              * A zero line-height collapses that box, so the line stays exactly
+              * as tall as the paragraph while the glyph still paints.
+              */}
+            <span
+                style={{
+                    opacity: 0.56,
+                    fontSize: '0.75rem',
+                    lineHeight: 0,
+                    marginLeft: 4,
+                    whiteSpace: 'nowrap',
+                    verticalAlign: 'baseline',
+                }}
+            >
                 {indicator}
             </span>
-            {popoverOpen && buttonRef.current && (
+            {popoverOpen && anchor && (
                 <ReadersPopover
-                    anchor={buttonRef.current}
+                    anchor={anchor}
                     readers={cachedReaders?.list ?? []}
                     status={readersStatus}
                     truncated={cachedReaders?.truncated ?? false}

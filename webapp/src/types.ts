@@ -30,6 +30,8 @@ export interface MMPost {
     user_id: string;
     channel_id: string;
     create_at: number;
+    update_at?: number;
+    edit_at?: number;
     delete_at?: number;
     state?: string;
 }

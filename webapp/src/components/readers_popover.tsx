@@ -47,7 +47,7 @@ export const ReadersPopover: React.FC<ReadersPopoverProps> = ({anchor, readers, 
 
     const shown = readers.slice(0, POPOVER_MAX_ROWS);
     const remaining = readers.length - shown.length;
-    const content = <div ref={ref} role='dialog' tabIndex={-1} style={{position: 'fixed', top, left: rect.left, zIndex: 1000, background: 'var(--center-channel-bg)', padding: 8, boxShadow: '0 2px 8px #0004'}}>
+    const content = <div ref={ref} role='dialog' tabIndex={-1} style={{position: 'fixed', top, left: rect.left, zIndex: 1000, lineHeight: 'normal', fontSize: '0.8125rem', background: 'var(--center-channel-bg)', padding: 8, boxShadow: '0 2px 8px #0004'}}>
         <strong>{t(locale, 'readBy')}</strong>
         {status !== 'ready' && <div>{t(locale, status === 'loading' ? 'readLoading' : 'readError')}</div>}
         {shown.map((reader) => <div key={reader.user_id}>{profileName(profiles[reader.user_id], reader.user_id)} · {reader.exact ? formatReadTime(reader.read_at, locale) : t(locale, 'readApprox', {time: formatReadTime(reader.read_at, locale)})}</div>)}

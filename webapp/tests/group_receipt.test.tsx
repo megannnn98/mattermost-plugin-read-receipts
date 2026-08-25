@@ -47,7 +47,7 @@ type Branch = {
 };
 
 function makeStore(channelType: string, branch: Partial<Branch> = {}, postAuthor = 'me') {
-    const state: any = {
+    let state: any = {
         entities: {
             users: {currentUserId: 'me', profiles: {}},
             channels: {
@@ -60,10 +60,23 @@ function makeStore(channelType: string, branch: Partial<Branch> = {}, postAuthor
         },
         [PLUGIN_BRANCH]: {watermarks: {}, receipts: {}, readers: {}, profiles: {}, ...branch},
     };
+    const listeners = new Set<() => void>();
     return {
         getState: () => state,
         dispatch: jest.fn(),
-        subscribe: jest.fn().mockReturnValue(() => undefined),
+        subscribe: (listener: () => void) => {
+            listeners.add(listener);
+            return () => listeners.delete(listener);
+        },
+        // Mirrors what Redux does: a new root object, then notify. Used by the
+        // tests that must re-render through the store rather than by re-rendering
+        // the component by hand.
+        patchPost: (patch: Record<string, unknown>) => {
+            const posts = {...state.entities.posts.posts};
+            posts.p1 = {...posts.p1, ...patch};
+            state = {...state, entities: {...state.entities, posts: {...state.entities.posts, posts}}};
+            listeners.forEach((listener) => listener());
+        },
     };
 }
 
@@ -81,7 +94,7 @@ describe('ReadReceipt in group, private and open channels', () => {
         document.body.innerHTML = `
             <div class="post">
                 <div class="post__body">
-                    <div class="post-message__text">hello</div>
+                    <div class="post-message__text"><p>hello</p></div>
                     <div id="slot"></div>
                 </div>
             </div>`;
@@ -95,7 +108,13 @@ describe('ReadReceipt in group, private and open channels', () => {
         document.body.innerHTML = '';
     });
 
-    const indicatorText = () => document.querySelector('.post-message__text')!.textContent!.replace('hello', '').trim();
+    // Only the indicator, never the message itself: an edited message would
+    // otherwise leak into the assertion.
+    const indicatorText = () => {
+        const text = document.querySelector('.post-message__text')!.textContent ?? '';
+        const match = text.match(/✓+(\s*\d+)?/);
+        return match ? match[0].trim() : '';
+    };
 
     it.each(['G', 'P', 'O'])('renders a sentinel for someone else post in a %s channel', (channelType) => {
         setStore(makeStore(channelType, {}, 'other') as any);
@@ -237,5 +256,53 @@ describe('ReadReceipt in group, private and open channels', () => {
         });
         expect(document.querySelector('[role="dialog"]')).toBeNull();
         (console.error as jest.Mock).mockRestore();
+    });
+    it('re-attaches the indicator after Mattermost rebuilds the message', () => {
+        const store = makeStore('G', {watermarks: {ch1: {a: watermark('a', 3000)}}}) as any;
+        setStore(store);
+        act(() => root.render(<ReadReceipt postId='p1'/>));
+        expect(indicatorText()).toBe('✓✓ 1');
+
+        // What an edit or a reaction does: React rebuilds the message and our
+        // appended node goes with it. Nothing tells this component to re-render,
+        // which is why the post's render key is part of the selector.
+        const text = document.querySelector('.post-message__text') as HTMLElement;
+        text.innerHTML = '<p>edited</p>';
+        const state = store.getState();
+        state.entities.posts.posts.p1 = {...state.entities.posts.posts.p1, update_at: 5000, edit_at: 5000};
+
+        act(() => root.render(<ReadReceipt postId='p1'/>));
+
+        expect(indicatorText()).toBe('✓✓ 1');
+        expect(document.querySelector('.post-message__text p')!.textContent).toContain('edited');
+    });
+
+    it('re-attaches when the node was dropped without any state change', () => {
+        setStore(makeStore('G', {watermarks: {ch1: {a: watermark('a', 3000)}}}) as any);
+        act(() => root.render(<ReadReceipt postId='p1'/>));
+        expect(indicatorText()).toBe('✓✓ 1');
+
+        const text = document.querySelector('.post-message__text') as HTMLElement;
+        text.innerHTML = '<p>hello</p>';
+
+        act(() => root.render(<ReadReceipt postId='p1'/>));
+
+        expect(indicatorText()).toBe('✓✓ 1');
+    });
+    it('notices a rebuilt message through the store, without being re-rendered by hand', () => {
+        const store = makeStore('G', {watermarks: {ch1: {a: watermark('a', 3000)}}}) as any;
+        setStore(store);
+        act(() => root.render(<ReadReceipt postId='p1'/>));
+        expect(indicatorText()).toBe('✓✓ 1');
+
+        // In the real client nothing re-renders this component when the message
+        // around it is rebuilt — it is a sibling of the message, not a child. The
+        // only thing that can wake it is a store change it actually selects, which
+        // is why the post's render key is part of the selected value.
+        const text = document.querySelector('.post-message__text') as HTMLElement;
+        text.innerHTML = '<p>edited</p>';
+        act(() => store.patchPost({update_at: 5000, edit_at: 5000}));
+
+        expect(indicatorText()).toBe('✓✓ 1');
     });
 });
