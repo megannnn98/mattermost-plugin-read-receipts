@@ -38,6 +38,11 @@ export interface PluginConfig {
 export interface PluginState {
     statuses: Record<string, PostStatus>;
     readers: Record<string, ReaderList>;
+    // Bumped for a post whenever a websocket receipt invalidates its cached
+    // reader list. `loadPostReaders` tags its dispatch with the epoch it started
+    // from, and the reducer drops a page whose epoch is behind this — so a stale
+    // in-flight response cannot overwrite the fresh list, only the WS event can.
+    readersEpoch: Record<string, number>;
     profiles: Record<string, MMUserProfile>;
     // Bumped whenever `profiles` changes. Components select this instead of the
     // profile map so that a profile arriving after a popover is already open

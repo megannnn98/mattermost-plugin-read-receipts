@@ -1,5 +1,6 @@
 import {PLUGIN_ID, fetchChannelReceipts, fetchPluginConfig, fetchPostReaders, fetchUsersByIds, reportRead, RequestError} from './client';
 import {ACTION_TYPES} from './reducer';
+import {selectReadersEpoch} from './selectors';
 import {PluginStore} from './types';
 
 class ReadDeduplicator {
@@ -112,8 +113,14 @@ export async function sendReadReceipt(
 /**
  * Loads one page of the reader list of a post, plus the profiles needed to name
  * the people in it. `offset` continues a truncated list rather than restarting it.
+ *
+ * The reader-list epoch is captured *before* the request goes out and carried on
+ * the dispatch. If a websocket receipt invalidates this post while the request is
+ * in flight, the reducer bumps the epoch and drops this now-stale page, so it can
+ * never overwrite a fresher list.
  */
 export async function loadPostReaders(store: PluginStore, postId: string, offset = 0): Promise<void> {
+    const epoch = selectReadersEpoch(store.getState(), postId);
     const response = await fetchPostReaders(postId, offset);
     store.dispatch({
         type: ACTION_TYPES.POST_READERS,
@@ -123,6 +130,7 @@ export async function loadPostReaders(store: PluginStore, postId: string, offset
             truncated: response.truncated,
             nextOffset: response.next_offset ?? 0,
             append: offset > 0,
+            epoch,
         },
     });
 

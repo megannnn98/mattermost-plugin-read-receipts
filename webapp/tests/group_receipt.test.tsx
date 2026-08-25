@@ -5,6 +5,7 @@ import {createRoot} from 'react-dom/client';
 import ReadReceipt from '../src/components/read_receipt';
 import {setStore} from '../src/store_ref';
 import {loadPostReaders} from '../src/actions';
+import {reducer, ACTION_TYPES} from '../src/reducer';
 
 jest.mock('../src/client', () => ({
     PLUGIN_ID: 'com.integrasources.read-receipts',
@@ -42,6 +43,7 @@ const PLUGIN_BRANCH = 'plugins-com.integrasources.read-receipts';
 type Branch = {
     statuses: Record<string, {count: number; truncated: boolean; read_at: number | null}>;
     readers: Record<string, {list: Array<{user_id: string; read_at: number; exact: boolean}>; truncated: boolean; nextOffset: number}>;
+    readersEpoch: Record<string, number>;
     profiles: Record<string, unknown>;
     profilesRevision: number;
     config: {enabled_channel_types: string} | null;
@@ -62,6 +64,7 @@ function makeStore(channelType: string, branch: Partial<Branch> = {}, postAuthor
         [PLUGIN_BRANCH]: {
             statuses: {},
             readers: {},
+            readersEpoch: {},
             profiles: {},
             profilesRevision: 0,
             config: enabled === '' ? null : {enabled_channel_types: enabled},
@@ -253,6 +256,155 @@ describe('ReadReceipt in group, private and open channels', () => {
         expect(document.querySelector('[role="dialog"]')).not.toBeNull();
     });
 
+    // Regression: a live websocket receipt raises the indicator's count but the
+    // cached reader list was left stale, so an open (or reopened) popover kept
+    // naming only the old readers. The reducer now drops that list on the event
+    // and the popover's effect refetches it, so the new reader is shown.
+    it('refetches and shows a new reader after a WS receipt invalidates the open list', async () => {
+        const store = makeStore('G', {
+            statuses: status(1),
+            readers: {p1: {list: [{user_id: 'a', read_at: 3100, exact: true}], truncated: false, nextOffset: 0}},
+        }) as any;
+        // Route a processed POST_READERS page back into the store so the refetch
+        // can land, mirroring what the real action does.
+        store.dispatch = jest.fn((action: any) => {
+            if (action.type === 'plugins-com.integrasources.read-receipts_POST_READERS') {
+                const {postId, readers, truncated, nextOffset} = action.data;
+                store.patchBranch({readers: {[postId]: {list: readers, truncated, nextOffset}}});
+            }
+            return undefined;
+        });
+        // The real action resolves after the response is dispatched.
+        (loadPostReaders as jest.Mock).mockImplementation(async (s, postId) => {
+            s.dispatch({
+                type: 'plugins-com.integrasources.read-receipts_POST_READERS',
+                data: {postId, readers: [{user_id: 'a', read_at: 3100, exact: true}, {user_id: 'b', read_at: 3200, exact: true}], truncated: false, nextOffset: 0, append: false},
+            });
+        });
+        setStore(store);
+        act(() => root.render(<ReadReceipt postId='p1'/>));
+
+        // Open the cached list: shows the old reader, no refetch yet.
+        const button = document.querySelector('.post-message__text button') as HTMLButtonElement;
+        act(() => button.click());
+        expect(loadPostReaders).not.toHaveBeenCalled();
+        expect(document.querySelector('[role="dialog"]')!.textContent).toContain('a ·');
+
+        // A live WS receipt: count 2, and the stale list is dropped by the reducer.
+        (loadPostReaders as jest.Mock).mockClear();
+        act(() => store.patchBranch({statuses: status(2), readers: {}}));
+
+        // The open popover refetches and, once the page lands, shows the new reader.
+        expect(loadPostReaders).toHaveBeenCalledTimes(1);
+        await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+        expect(document.querySelector('[role="dialog"]')!.textContent).toContain('b ·');
+        expect(document.querySelector('[role="dialog"]')!.textContent).not.toContain('Could not load');
+    });
+
+    // The in-flight race: a request issued before a WS receipt is still pending
+    // when the WS invalidates the post. The epoch mechanism must (a) re-fire the
+    // open popover's load even though no list was cached yet, and (b) make the
+    // reducer drop the late stale response, so the fresh one is what lands.
+    it('does not let a stale in-flight reader page win over a live WS receipt', async () => {
+        // A store whose dispatches go through the real reducer, so the epoch logic
+        // is exercised end to end rather than faked.
+        const base = {
+            entities: {
+                users: {currentUserId: 'me', profiles: {}},
+                channels: {currentChannelId: 'ch1', channels: {ch1: {id: 'ch1', type: 'G'}}},
+                posts: {posts: {p1: {id: 'p1', user_id: 'me', channel_id: 'ch1', create_at: 2000}}},
+            },
+            [PLUGIN_BRANCH]: (reducer as any)(undefined, {type: 'UNKNOWN'}),
+        };
+        let state: any = base;
+        const listeners = new Set<() => void>();
+        const store = {
+            getState: () => state,
+            dispatch: jest.fn((action: any) => {
+                state = {
+                    ...state,
+                    [PLUGIN_BRANCH]: reducer(state[PLUGIN_BRANCH], action),
+                };
+                listeners.forEach((l) => l());
+                return undefined;
+            }),
+            subscribe: (l: () => void) => {
+                listeners.add(l);
+                return () => listeners.delete(l);
+            },
+        };
+
+        // Request A (statuses pre-WS, epoch 0) is held open; request B (fresh,
+        // epoch 1) is also held. Resolving them in order lets us prove the stale
+        // A is rejected and only the fresh B lands.
+        let resolveA: (value?: unknown) => void = () => undefined;
+        let resolveB: (value?: unknown) => void = () => undefined;
+        (loadPostReaders as jest.Mock)
+            .mockImplementationOnce(() => new Promise((resolve) => {
+                resolveA = () => {
+                    // The in-flight stale page comes back late with the OLD epoch.
+                    store.dispatch({
+                        type: ACTION_TYPES.POST_READERS,
+                        data: {postId: 'p1', readers: [{user_id: 'a', read_at: 3100, exact: true}], truncated: false, nextOffset: 0, append: false, epoch: 0},
+                    });
+                    resolve(undefined);
+                };
+            }))
+            .mockImplementationOnce(() => new Promise((resolve) => {
+                resolveB = () => {
+                    store.dispatch({
+                        type: ACTION_TYPES.POST_READERS,
+                        data: {postId: 'p1', readers: [{user_id: 'b', read_at: 3200, exact: true}, {user_id: 'a', read_at: 3100, exact: true}], truncated: false, nextOffset: 0, append: false, epoch: 1},
+                    });
+                    resolve(undefined);
+                };
+            }));
+        setStore(store as any);
+        // Seed config (channel type G enabled) and a count so the group indicator
+        // renders as a clickable button.
+        act(() => store.dispatch({
+            type: ACTION_TYPES.CONFIG,
+            data: {config: {enabled_channel_types: 'DGPO'}},
+        }));
+        act(() => store.dispatch({
+            type: ACTION_TYPES.RECEIPTS_QUERY,
+            data: {channelId: 'ch1', posts: {p1: {count: 1, truncated: false, read_at: null}}},
+        }));
+        act(() => root.render(<ReadReceipt postId='p1'/>));
+
+        // Open the popover with no cache: request A goes out.
+        act(() => (document.querySelector('.post-message__text button') as HTMLButtonElement).click());
+        expect(loadPostReaders).toHaveBeenCalledTimes(1);
+
+        // A live WS receipt invalidates the post (reducer bumps the epoch to 1).
+        act(() => store.dispatch({
+            type: ACTION_TYPES.WS_RECEIPT,
+            data: {channel_id: 'ch1', post_id: 'p1', read_at: 3200, reader_id: 'b', isDM: false},
+        }));
+        expect(state[PLUGIN_BRANCH].statuses.p1.count).toBe(1);
+        expect(state[PLUGIN_BRANCH].readersEpoch.p1).toBe(1);
+        // The open popover re-loads — the epoch change fired the effect even though
+        // no list was cached and nothing else about the cache changed.
+        expect(loadPostReaders).toHaveBeenCalledTimes(2);
+
+        // The late stale response (A, epoch 0) resolves now: it must be dropped.
+        await act(async () => {
+            resolveA();
+            await Promise.resolve();
+        });
+        expect(state[PLUGIN_BRANCH].readers.p1).toBeUndefined();
+
+        // Request B (fresh, epoch 1) lands and is what the popover shows.
+        await act(async () => {
+            resolveB();
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(state[PLUGIN_BRANCH].readers.p1.list.map((r) => r.user_id)).toEqual(['b', 'a']);
+        expect(document.querySelector('[role="dialog"]')!.textContent).toContain('b ·');
+        expect(document.querySelector('[role="dialog"]')!.textContent).toContain('a ·');
+    });
+
     it('closes the reader list on Escape', () => {
         setStore(makeStore('G', {
             statuses: status(1),
@@ -275,8 +427,11 @@ describe('ReadReceipt in group, private and open channels', () => {
         }) as any);
         act(() => root.render(<ReadReceipt postId='p1'/>));
 
+        // The popover's effect loads the readers after the click, so give the
+        // rejected request enough microtask turns to flip the status to "error".
         await act(async () => {
             (document.querySelector('.post-message__text button') as HTMLButtonElement).click();
+            await Promise.resolve();
             await Promise.resolve();
         });
 
@@ -354,8 +509,11 @@ describe('ReadReceipt in group, private and open channels', () => {
         setStore(makeStore('G', {statuses: status(1)}) as any);
         act(() => root.render(<ReadReceipt postId='p1'/>));
 
+        // Reader loading is deferred to the popover's effect, so flush enough
+        // microtasks for the rejected request to flip the status to "error".
         await act(async () => {
             (document.querySelector('.post-message__text button') as HTMLButtonElement).click();
+            await Promise.resolve();
             await Promise.resolve();
         });
 

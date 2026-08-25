@@ -51,21 +51,29 @@ Mattermost-плагин: отправитель видит рядом со св�
 - **Detect Desktop** — `window.desktopAPI.getAppInfo()` (пакет `@mattermost/desktop-api`), плюс
   `onUserActivityUpdate` для idle. UA-хак не используется. Это не security boundary.
 - **Хранение** — KV плагина: монотонный watermark `wm_<channelID>_<readerID>` =
-  `{post_id, create_at, read_at}` (без TTL) + точное время `rr_<postID>_<readerID>` = `read_at`
-  с TTL `ReceiptRetentionDays` (по умолчанию 30 дней), запись first-write-wins через
-  `KVSetWithOptions{Atomic: true, OldValue: nil}`.
+  `{post_id, create_at, read_at}` (без TTL) + точное время `rr_<channelID>_<postID>_<readerID>` =
+  `read_at` с TTL `ReceiptRetentionDays` (по умолчанию 30 дней), запись first-write-wins через
+  `KVSetWithOptions{Atomic: true, OldValue: nil}`. Ключ `rr_*` включает канал, чтобы один и тот же
+  `post_id`, запрошенный из чужого канала, физически не сопоставился с чужим receipt; старые ключи
+  `rr_<postID>_<readerID>` (без канала) с TTL ещё существуют, но не читаются и истекают сами.
 - **Эндпоинты** — `POST /plugins/com.integrasources.read-receipts/api/v1/read` `{post_id}` и
   `POST /plugins/com.integrasources.read-receipts/api/v1/receipts/query`
   `{channel_id, post_ids[]}`; user_id всегда берётся из заголовка `Mattermost-User-Id`, из тела
   запроса — никогда.
 - **WS-событие** — `custom_com.integrasources.read-receipts_read_receipt`, broadcast адресный
-  (`WebsocketBroadcast{UserId: postAuthorID}`), публикуется только когда watermark продвинулся.
-- **Клиентский gating** («прочитано») — все условия сразу: Desktop, канал поста ==
-  `currentChannelId` и тип `D`, окно видимо и в фокусе, пользователь не idle, элемент виден
-  (`IntersectionObserver`, threshold 0.75), dwell ≥ 1000 мс; дедупликация локальным watermark'ом.
+  (`WebsocketBroadcast{UserId: postAuthorID}`), публикуется после успеха обеих записей (receipt и
+  watermark), если изменился хотя бы один из них (`written || advanced`) — повторный POST не шлёт
+  лишних событий.
+- **Клиентский gating** («прочитано») — все условия сразу: Desktop, тип канала поста входит в
+  серверный `EnabledChannelTypes` (`isEligibleChannel`), канал поста == `currentChannelId`, пост —
+  не свой, не удалён и не ответ в треде, окно видимо и в фокусе, пользователь не idle, элемент
+  виден (`IntersectionObserver`, threshold 0.75), dwell ≥ 1000 мс; повторная отправка гасится
+  локальным `ReadDeduplicator` (channelId + postId + create_at). Само число читателей для G/P/O
+  приходит от **сервера** (`/receipts/query`), а не считается на клиенте по watermark'ам.
 - **channel watcher** (`webapp/src/channel_watcher.ts`) — один запрос `/receipts/query` на
-  открытый DM (свои посты, максимум 200, новые первыми) плюс `registerReconnectHandler` →
-  перечитывание после обрыва WebSocket. Polling'а нет и не должно появиться.
+  открытый канал, для которого включён тип (свои посты, максимум 200, новые первыми) плюс
+  `registerReconnectHandler` → перечитывание после обрыва WebSocket. Polling'а нет и не должно
+  появиться.
 
 Подробности — в `README.md` репозитория (разделы Architecture, Test, Limitations,
 Dependencies on Mattermost Internals).
@@ -130,6 +138,9 @@ docker exec mm-rr mmctl --local plugin enable com.integrasources.read-receipts
 Токены A/B/C — `POST /api/v4/users/login` (заголовок ответа `Token`), DM-канал —
 `POST /api/v4/channels/direct`, сообщение от A — `POST /api/v4/posts`.
 
+Перед групповыми/публичными проверками включите нужные типы: по умолчанию включён только `D`,
+прочие (`G`, `P`, `O`) администратор включает через `EnabledChannelTypes` (иначе `read` вернёт 403).
+
 | Проверка | Ожидание |
 |---|---|
 | B → `/api/v1/read` для поста A | 200, `read_at` заполнен |
@@ -138,7 +149,7 @@ docker exec mm-rr mmctl --local plugin enable com.integrasources.read-receipts
 | B → `read` для более старого поста | watermark не откатывается назад |
 | C (не участник DM) → оба эндпоинта | 403 |
 | A (автор) → `read` на свой пост | 403 |
-| пост в публичном канале → `read` | 200 (тип O включён по умолчанию) |
+| пост в публичном канале → `read` | 200 (тип O включён в `EnabledChannelTypes`) |
 | то же при `EnabledChannelTypes=D` | 403 |
 | групповой канал, читают B и C, A → `query` | `count = 2`, идентичностей читателей в ответе нет |
 | группа (K > 1) → `query` | `read_at` отсутствует: точные времена отдаёт `/receipts/post` |

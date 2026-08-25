@@ -16,7 +16,10 @@ export interface InlineMount {
  * trailing text instead.
  *
  * Anything else as the last block (a code block, a quote, a table) is left alone:
- * putting a checkmark inside those would be worse than a line below them.
+ * writing a checkmark into those would be worse than a line below them, but an
+ * inline span after the block still starts that new line. Returning null makes
+ * `createInlineMount` fall back to its height-neutral overlay strategy, which is
+ * where a trailing block terminal belongs.
  */
 function resolveTextTarget(body: HTMLElement): HTMLElement | null {
     const text = body.querySelector('.post-message__text');
@@ -27,7 +30,7 @@ function resolveTextTarget(body: HTMLElement): HTMLElement | null {
     if (last && last.tagName === 'P') {
         return last as HTMLElement;
     }
-    return text as HTMLElement;
+    return null;
 }
 
 export function resolvePostBody(sentinel: HTMLElement): HTMLElement | null {

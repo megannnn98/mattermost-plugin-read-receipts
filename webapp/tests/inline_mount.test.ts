@@ -42,7 +42,25 @@ describe('createInlineMount', () => {
 
         const mount = createInlineMount(sentinel);
 
-        expect(mount!.target.parentElement!.className).toBe('post-message__text');
+        // An inline span after a block (pre/quote/table) would start a new
+        // anonymous line and grow the post by exactly the height this removes.
+        // Falling back to the overlay keeps it height-neutral instead.
+        expect(mount!.strategy).toBe('overlay');
+        expect(mount!.target.parentElement).toBe(document.querySelector('.post__body'));
+        expect(mount!.target.style.position).toBe('absolute');
+    });
+
+    it('does not grow a trailing code block post', () => {
+        const sentinel = buildPost('<p>look</p><pre><code>x = 1</code></pre>');
+
+        const body = document.querySelector('.post__body') as HTMLElement;
+        const before = body.getBoundingClientRect().height;
+        createInlineMount(sentinel);
+        const after = body.getBoundingClientRect().height;
+
+        // The overlay is absolutely positioned, so it leaves the post's layout
+        // height untouched.
+        expect(after).toBe(before);
     });
 
     it('falls back to a height-neutral overlay when there is no message text', () => {

@@ -6,6 +6,7 @@ const EMPTY_STATUS: PostStatus = {count: 0, truncated: false, read_at: null};
 const emptyPluginState: PluginState = {
     statuses: {},
     readers: {},
+    readersEpoch: {},
     profiles: {},
     profilesRevision: 0,
     config: null,
@@ -21,6 +22,16 @@ export function selectPostStatus(state: GlobalState, postId: string): PostStatus
 
 export function selectPostReaders(state: GlobalState, postId: string): ReaderList | undefined {
     return selectPluginState(state).readers[postId];
+}
+
+/**
+ * The reader-list epoch of a post: incremented each time a websocket receipt
+ * invalidates that post's cached list. Requesting actions capture it up front so
+ * the reducer can tell a response that started before an invalidation from one
+ * that started after it (see `readersEpoch` in PluginState).
+ */
+export function selectReadersEpoch(state: GlobalState, postId: string): number {
+    return selectPluginState(state).readersEpoch?.[postId] ?? 0;
 }
 
 export function selectProfilesRevision(state: GlobalState): number {

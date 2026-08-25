@@ -6,6 +6,7 @@ describe('reducer', () => {
         expect(reducer(undefined, {type: 'UNKNOWN'})).toEqual({
             statuses: {},
             readers: {},
+            readersEpoch: {},
             profiles: {},
             profilesRevision: 0,
             config: null,
@@ -74,9 +75,80 @@ describe('reducer', () => {
             expect(state.statuses.p1.count).toBe(1);
         });
 
+        it('invalidates a cached reader list so a fresh read is visible', () => {
+            const seeded = reducer(undefined, {
+                type: ACTION_TYPES.RECEIPTS_QUERY,
+                data: {channelId: 'ch1', posts: {p1: {count: 1, truncated: false, read_at: 1000}}},
+            });
+            const withList = reducer(seeded, {
+                type: ACTION_TYPES.POST_READERS,
+                data: {
+                    postId: 'p1',
+                    readers: [{user_id: 'a', read_at: 1000, exact: true}],
+                    truncated: false,
+                    nextOffset: 0,
+                    append: false,
+                    epoch: 0,
+                },
+            });
+            const after = reducer(withList, {
+                type: ACTION_TYPES.WS_RECEIPT,
+                data: {channel_id: 'ch1', post_id: 'p1', read_at: 2000, reader_id: 'b', isDM: false},
+            });
+
+            // The event is a floor on the count, and the stale [a] list is dropped
+            // so the popover will re-fetch and include the new reader b. The epoch
+            // bump is what lets the popover re-fire and reject older pages.
+            expect(after.statuses.p1.count).toBe(1);
+            expect(after.readers.p1).toBeUndefined();
+            expect(after.readersEpoch.p1).toBe(1);
+        });
+
         it('ignores an event without a post id', () => {
             const before = reducer(undefined, {type: 'UNKNOWN'});
             expect(reducer(before, {type: ACTION_TYPES.WS_RECEIPT, data: {reader_id: 'b'}})).toBe(before);
+        });
+
+        // Regression for the in-flight race: a request issued before the WS carried
+        // the old epoch; when it lands after the invalidation its stale page must be
+        // dropped, not written over the (fresh or still-missing) list.
+        it('drops a reader page issued against a stale epoch after a WS invalidation', () => {
+            const invalidated = reducer(undefined, {
+                type: ACTION_TYPES.WS_RECEIPT,
+                data: {channel_id: 'ch1', post_id: 'p1', read_at: 2000, reader_id: 'b', isDM: false},
+            });
+            expect(invalidated.readersEpoch.p1).toBe(1);
+
+            // The in-flight response for the pre-WS request (epoch 0) comes back late.
+            const stale = reducer(invalidated, {
+                type: ACTION_TYPES.POST_READERS,
+                data: {
+                    postId: 'p1',
+                    readers: [{user_id: 'a', read_at: 1000, exact: true}],
+                    truncated: false,
+                    nextOffset: 0,
+                    append: false,
+                    epoch: 0,
+                },
+            });
+
+            // Not accepted: the list stays absent so the popover still needs to load.
+            expect(stale.readers.p1).toBeUndefined();
+            expect(stale.readersEpoch.p1).toBe(1);
+
+            // A page for the current epoch lands normally.
+            const fresh = reducer(stale, {
+                type: ACTION_TYPES.POST_READERS,
+                data: {
+                    postId: 'p1',
+                    readers: [{user_id: 'a', read_at: 1000, exact: true}, {user_id: 'b', read_at: 2000, exact: true}],
+                    truncated: false,
+                    nextOffset: 0,
+                    append: false,
+                    epoch: 1,
+                },
+            });
+            expect(fresh.readers.p1.list.map((r) => r.user_id)).toEqual(['a', 'b']);
         });
     });
 

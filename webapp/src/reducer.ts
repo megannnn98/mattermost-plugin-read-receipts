@@ -6,6 +6,7 @@ export type {PluginState, PostStatus} from './types';
 const initialState: PluginState = {
     statuses: {},
     readers: {},
+    readersEpoch: {},
     profiles: {},
     profilesRevision: 0,
     config: null,
@@ -39,6 +40,10 @@ type ReadersActionData = {
     truncated: boolean;
     nextOffset: number;
     append: boolean;
+    // The reader-list epoch this page was fetched against (see `readersEpoch`).
+    // A page started before a websocket invalidation carries the old epoch and
+    // is dropped, never allowed to overwrite the fresh state.
+    epoch?: number;
 };
 
 export function reducer(
@@ -72,17 +77,39 @@ export function reducer(
             // a decrement — a stale event must not walk the count backwards.
             const count = Math.max(existing?.count ?? 0, 1);
             const readAt = isDM ? read_at : (existing?.read_at ?? null);
+            // A live receipt proves a new reader reached this post, so any cached
+            // reader *list* for it is stale by definition. Drop it here and bump
+            // the post's epoch, which both re-triggers the open popover's reload
+            // and makes the reducer reject any page a still-in-flight request
+            // started before this event. Without the epoch, a response issued
+            // just before the WS could land after it and overwrite the fresh list
+            // with the old one.
+            const readers = {...state.readers};
+            delete readers[post_id];
+            const readersEpoch = {...state.readersEpoch};
+            readersEpoch[post_id] = (state.readersEpoch[post_id] ?? 0) + 1;
             return {
                 ...state,
                 statuses: {
                     ...state.statuses,
                     [post_id]: {count, truncated: existing?.truncated ?? false, read_at: readAt},
                 },
+                readers,
+                readersEpoch,
             };
         }
 
         case ACTION_TYPES.POST_READERS: {
             const data = (action.data ?? {}) as ReadersActionData;
+            // Reject a page issued against a stale generation: a websocket receipt
+            // invalidated this post after the request began, so its content is
+            // outdated and must not overwrite the fresh (or still-missing) list.
+            // A missing epoch defaults to 0 and is only ever equal-or-newer on the
+            // very first fetch, which keeps existing dispatches working.
+            const epoch = data.epoch ?? 0;
+            if (epoch < (state.readersEpoch[data.postId] ?? 0)) {
+                return state;
+            }
             const previous = data.append ? state.readers[data.postId]?.list ?? [] : [];
             return {
                 ...state,

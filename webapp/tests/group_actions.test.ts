@@ -90,7 +90,7 @@ describe('loadPostReaders', () => {
 
         expect(store.dispatch).toHaveBeenCalledWith({
             type: ACTION_TYPES.POST_READERS,
-            data: {postId: 'p1', readers: expect.any(Array), truncated: false, nextOffset: 0, append: false},
+            data: {postId: 'p1', readers: expect.any(Array), truncated: false, nextOffset: 0, append: false, epoch: 0},
         });
         // Both the webapp's own profiles and the ones this plugin already fetched
         // count as known, otherwise every popover open refetches the same users.
@@ -129,7 +129,7 @@ describe('paging the reader list', () => {
         expect(mockedPostReaders).toHaveBeenCalledWith('p1', 200);
         expect(store.dispatch).toHaveBeenCalledWith({
             type: ACTION_TYPES.POST_READERS,
-            data: {postId: 'p1', readers: expect.any(Array), truncated: false, nextOffset: 0, append: true},
+            data: {postId: 'p1', readers: expect.any(Array), truncated: false, nextOffset: 0, append: true, epoch: 0},
         });
     });
 });

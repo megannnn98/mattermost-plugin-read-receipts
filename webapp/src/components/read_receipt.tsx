@@ -8,7 +8,7 @@ import {getVisibilityTracker, VisibilityState} from '../visibility';
 import {formatReadTime, getLocaleFromState, t, SupportedLocale} from '../i18n';
 import {usePluginSelector} from '../hooks';
 import {getPostContext, shouldReportRead} from '../gating';
-import {selectPostReaders, selectPostStatus, selectProfilesRevision, selectReaderProfile} from '../selectors';
+import {selectPostReaders, selectPostStatus, selectProfilesRevision, selectReaderProfile, selectReadersEpoch} from '../selectors';
 import {createInlineMount, InlineMount, observeMountRemoval, resolvePostBody} from '../inline_mount';
 import {ReadersPopover, ReadersStatus} from './readers_popover';
 import {StatusTicks} from './status_ticks';
@@ -58,6 +58,11 @@ type Display = {
     truncated: boolean;
     readAt: number | null;
     readers: unknown;
+    // Bumped by the reducer when a websocket receipt invalidates this post's
+    // reader list. Selecting it makes a re-render (and the popover's reload
+    // effect) fire on invalidation even when no list was cached to begin with —
+    // the case where a stale in-flight page could otherwise win the race.
+    readersEpoch: number;
     // Selected purely so that a profile arriving while the reader list is open
     // re-renders it. The profile map itself is read during render.
     profilesRevision: number;
@@ -73,6 +78,7 @@ const isEqualDisplay = (a: Display, b: Display): boolean =>
     a.truncated === b.truncated &&
     a.readAt === b.readAt &&
     a.readers === b.readers &&
+    a.readersEpoch === b.readersEpoch &&
     a.profilesRevision === b.profilesRevision;
 
 interface ReadReceiptProps {
@@ -95,7 +101,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
 
     const store = getStore();
 
-    const {isOwn, isDM, eligible, isThreadReply, delivered, count, truncated, readAt} = usePluginSelector(
+    const {isOwn, isDM, eligible, isThreadReply, delivered, count, truncated, readAt, readersEpoch} = usePluginSelector(
         store,
         (state) => {
             const context = getPostContext(state, postId);
@@ -110,6 +116,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
                 truncated: status.truncated,
                 readAt: status.read_at,
                 readers: selectPostReaders(state, postId),
+                readersEpoch: selectReadersEpoch(state, postId),
                 profilesRevision: selectProfilesRevision(state),
             };
         },
@@ -294,6 +301,45 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         // to true is what actually binds the observer to the mounted sentinel.
     }, [postId, store, eligible]);
 
+    const state = store?.getState();
+    const cachedReaders = state ? selectPostReaders(state, postId) : undefined;
+    const nameOf = (userId: string) => (state ? selectReaderProfile(state, userId) : undefined);
+
+    const loadReaders = (offset: number) => {
+        if (!store) {
+            return;
+        }
+        setReadersFailed(false);
+        loadPostReaders(store, postId, offset).catch((error) => {
+            console.error(`[${PLUGIN_ID}] Failed to load post readers:`, error);
+            setReadersFailed(true);
+        });
+    };
+    const openPopover = () => {
+        setPopoverOpen(true);
+    };
+
+    // Load the reader list while the popover is open. The popover's effect owns
+    // the open-and-reopen path so a live WS receipt — which invalidates the cached
+    // list and bumps the post's epoch (see reducer) — is applied to a popover that
+    // is already showing. Keying on `readersEpoch` re-fires the load even when no
+    // list was cached to begin with: that is the exact race where a stale in-flight
+    // response started before the WS could otherwise write the old list back. The
+    // old page is dropped by the reducer (epoch mismatch) while this load fetches
+    // afresh. Keying on `cachedReaders` stops the load once the list has landed and
+    // stops a failed load from looping (the deps stay unchanged on failure).
+    useEffect(() => {
+        if (!popoverOpen || !store) {
+            return;
+        }
+        if (!cachedReaders) {
+            loadReaders(0);
+        }
+        // `cachedReaders` and `readersEpoch` are the staleness signals; `postId`
+        // and `store` re-scope the effect when the component is reused for another
+        // post.
+    }, [postId, popoverOpen, cachedReaders, readersEpoch, store]);
+
     // Thread replies are out of scope for this version. A reply lives in the same
     // channel as its root, so tracking it would let a reply read in the sidebar
     // advance the channel watermark and mark every older message read. Root posts
@@ -315,27 +361,6 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
     if (!delivered) {
         return null;
     }
-
-    const state = store?.getState();
-    const cachedReaders = state ? selectPostReaders(state, postId) : undefined;
-    const nameOf = (userId: string) => (state ? selectReaderProfile(state, userId) : undefined);
-
-    const loadReaders = (offset: number) => {
-        if (!store) {
-            return;
-        }
-        setReadersFailed(false);
-        loadPostReaders(store, postId, offset).catch((error) => {
-            console.error(`[${PLUGIN_ID}] Failed to load post readers:`, error);
-            setReadersFailed(true);
-        });
-    };
-    const openPopover = () => {
-        if (!cachedReaders) {
-            loadReaders(0);
-        }
-        setPopoverOpen(true);
-    };
 
     // The popover is rendered as soon as it is opened, before the readers arrive.
     // Waiting for the data would leave a failed request with an open flag and no

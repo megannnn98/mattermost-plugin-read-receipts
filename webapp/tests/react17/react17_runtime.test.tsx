@@ -80,6 +80,7 @@ describe('React 17 runtime', () => {
             'plugins-com.integrasources.read-receipts': {
                 statuses: {p1: {count: 1, truncated: false, read_at: 60000}},
                 readers: {},
+                readersEpoch: {},
                 profiles: {},
                 profilesRevision: 0,
                 config: {enabled_channel_types: 'DGPO'},
@@ -90,6 +91,9 @@ describe('React 17 runtime', () => {
         postBody.className = 'post__body';
         const text = document.createElement('div');
         text.className = 'post-message__text';
+        // A normal message is a single paragraph; the indicator mounts inside it
+        // so it shares the trailing line instead of adding one below the block.
+        text.innerHTML = '<p>hi</p>';
         postBody.append(text, container);
         document.body.appendChild(postBody);
 
@@ -111,6 +115,7 @@ describe('React 17 runtime', () => {
             'plugins-com.integrasources.read-receipts': {
                 statuses: {p1: {count: 1, truncated: false, read_at: null}},
                 readers: {p1: {list: [{user_id: 'a', read_at: 5100, exact: true}], truncated: false, nextOffset: 0}},
+                readersEpoch: {},
                 profiles: {a: {username: 'ada'}},
                 profilesRevision: 1,
                 config: {enabled_channel_types: 'DGPO'},
@@ -121,6 +126,7 @@ describe('React 17 runtime', () => {
         postBody.className = 'post__body';
         const text = document.createElement('div');
         text.className = 'post-message__text';
+        text.innerHTML = '<p>hi</p>';
         postBody.append(text, container);
         document.body.appendChild(postBody);
 

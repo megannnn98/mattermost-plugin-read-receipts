@@ -7,6 +7,7 @@ export function pluginBranch(overrides: Partial<PluginState> = {}): PluginState 
     return {
         statuses: {},
         readers: {},
+        readersEpoch: {},
         profiles: {},
         profilesRevision: 0,
         config: {enabled_channel_types: 'DGPO'},
