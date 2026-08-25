@@ -1,4 +1,4 @@
-import {PLUGIN_ID, fetchChannelReceipts, reportRead} from './client';
+import {fetchChannelReceipts, fetchPostReaders, fetchUsersByIds, PLUGIN_ID, reportRead, RequestError} from './client';
 import {ACTION_TYPES} from './reducer';
 import {PluginStore} from './types';
 
@@ -71,12 +71,15 @@ export async function loadChannelReceipts(
             type: ACTION_TYPES.RECEIPTS_QUERY,
             data: {
                 channelId,
-                watermark: response.watermark,
+                watermarks: response.watermarks,
                 receipts: response.receipts,
             },
         });
         return true;
     } catch (error) {
+        if ((error as RequestError).status === 403) {
+            return true;
+        }
         console.error(`[${PLUGIN_ID}] Failed to load receipts:`, error);
         return false;
     }
@@ -97,7 +100,31 @@ export async function sendReadReceipt(
         dedup.markSent(channelId, postId, createAt);
         return true;
     } catch (error) {
+        if ((error as RequestError).status === 403) {
+            dedup.markSent(channelId, postId, createAt);
+            return true;
+        }
         console.error(`[${PLUGIN_ID}] Failed to send read receipt:`, error);
         return false;
     }
+}
+
+export async function loadPostReaders(store: PluginStore, postId: string): Promise<void> {
+    const response = await fetchPostReaders(postId);
+    store.dispatch({type: ACTION_TYPES.POST_READERS, data: {postId, readers: response.readers, truncated: response.truncated}});
+
+    const state = store.getState();
+    const known = {
+        ...(state.entities?.users?.profiles ?? {}),
+        ...((state[`plugins-${PLUGIN_ID}`] as {profiles?: Record<string, unknown>} | undefined)?.profiles ?? {}),
+    };
+    const missing = response.readers.map((reader) => reader.user_id).filter((userId) => !known[userId]);
+    if (missing.length === 0) {
+        return;
+    }
+    const profiles = await fetchUsersByIds(missing);
+    store.dispatch({
+        type: ACTION_TYPES.PROFILES,
+        data: {profiles: Object.fromEntries(profiles.map((profile) => [profile.id, profile]))},
+    });
 }

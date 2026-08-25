@@ -6,7 +6,13 @@ function getCSRFToken(): string | null {
     return match ? match[1] : null;
 }
 
-async function request<T>(endpoint: string, body: unknown): Promise<T> {
+export class RequestError extends Error {
+    constructor(public readonly status: number, message: string) {
+        super(message);
+    }
+}
+
+async function request<T>(url: string, body: unknown): Promise<T> {
     const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         'X-Requested-With': 'XMLHttpRequest',
@@ -17,7 +23,7 @@ async function request<T>(endpoint: string, body: unknown): Promise<T> {
         headers['X-CSRF-Token'] = csrf;
     }
 
-    const response = await fetch(`${BASE_URL}${endpoint}`, {
+    const response = await fetch(url, {
         method: 'POST',
         headers,
         credentials: 'same-origin',
@@ -25,7 +31,7 @@ async function request<T>(endpoint: string, body: unknown): Promise<T> {
     });
 
     if (!response.ok) {
-        throw new Error(`Request failed: ${response.status} ${response.statusText}`);
+        throw new RequestError(response.status, `Request failed: ${response.status} ${response.statusText}`);
     }
 
     return response.json();
@@ -39,23 +45,38 @@ export interface ReadResponse {
 }
 
 export interface QueryResponse {
-    watermark: {
+    watermarks: Array<{
+        reader_id: string;
         post_id: string;
         create_at: number;
         read_at: number;
-    } | null;
-    receipts: Record<string, number>;
+    }>;
+    receipts: Record<string, Record<string, number>>;
+    truncated: boolean;
+}
+
+export interface PostReadersResponse {
+    readers: Array<{user_id: string; read_at: number; exact: boolean}>;
+    truncated: boolean;
 }
 
 export async function reportRead(postId: string): Promise<ReadResponse> {
-    return request<ReadResponse>('/read', {post_id: postId});
+    return request<ReadResponse>(`${BASE_URL}/read`, {post_id: postId});
+}
+
+export async function fetchPostReaders(postId: string): Promise<PostReadersResponse> {
+    return request<PostReadersResponse>(`${BASE_URL}/receipts/post`, {post_id: postId});
+}
+
+export async function fetchUsersByIds(userIds: string[]): Promise<Array<{id: string; username: string; first_name?: string; last_name?: string}>> {
+    return request('/api/v4/users/ids', userIds);
 }
 
 export async function fetchChannelReceipts(
     channelId: string,
     postIds: string[]
 ): Promise<QueryResponse> {
-    return request<QueryResponse>('/receipts/query', {
+    return request<QueryResponse>(`${BASE_URL}/receipts/query`, {
         channel_id: channelId,
         post_ids: postIds,
     });
