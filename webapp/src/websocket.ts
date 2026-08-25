@@ -8,7 +8,7 @@ export const WS_EVENT = `custom_${PLUGIN_ID}_read_receipt`;
  * `registerWebSocketEventHandler` passes the whole websocket message as the only
  * argument (`{event, data, broadcast, seq}`), not (event, data).
  */
-export function handleWebSocketEvent(msg: WebSocketMessage, store: PluginStore): void {
+export function handleWebSocketEvent(msg: WebSocketMessage, store: PluginStore, onCountChanged?: () => void): void {
     if (!msg || msg.event !== WS_EVENT || !msg.data) {
         return;
     }
@@ -31,6 +31,11 @@ export function handleWebSocketEvent(msg: WebSocketMessage, store: PluginStore):
         return;
     }
 
+    // A DM has exactly one other member, so the event alone is the whole truth
+    // there — one reader, at this time. Anywhere else it only proves that someone
+    // read the post; the authoritative count comes from the next query.
+    const channel = store.getState()?.entities?.channels?.channels?.[channelId];
+
     store.dispatch({
         type: ACTION_TYPES.WS_RECEIPT,
         data: {
@@ -39,6 +44,13 @@ export function handleWebSocketEvent(msg: WebSocketMessage, store: PluginStore):
             create_at: Number(msg.data.create_at ?? 0),
             read_at: Number(msg.data.read_at ?? 0),
             reader_id: readerId,
+            isDM: channel?.type === 'D',
         },
     });
+
+    // Outside a DM the event says "at least one more person read this" but not
+    // how many, so the accurate number has to come from a re-query.
+    if (channel?.type !== 'D') {
+        onCountChanged?.();
+    }
 }

@@ -1,73 +1,85 @@
 import {getPostContext, shouldReportRead} from '../src/gating';
+import {makeGlobalState} from './helpers';
 
-function makeState(overrides: any = {}) {
-    return {
-        entities: {
-            users: {currentUserId: 'me'},
-            channels: {
-                currentChannelId: 'dm1',
-                channels: {
-                    dm1: {id: 'dm1', type: 'D'},
-                    dm2: {id: 'dm2', type: 'D'},
-                    town: {id: 'town', type: 'O'},
-                },
-            },
-            posts: {
-                posts: {
-                    theirs: {id: 'theirs', user_id: 'other', channel_id: 'dm1', create_at: 100},
-                    mine: {id: 'mine', user_id: 'me', channel_id: 'dm1', create_at: 200},
-                    otherChannel: {id: 'otherChannel', user_id: 'other', channel_id: 'dm2', create_at: 300},
-                    inTown: {id: 'inTown', user_id: 'other', channel_id: 'town', create_at: 400},
-                    deleted: {id: 'deleted', user_id: 'other', channel_id: 'dm1', create_at: 500, delete_at: 501},
-                },
-            },
-        },
-        ...overrides,
-    };
-}
+const CHANNELS = {
+    dm: {id: 'dm', type: 'D'},
+    group: {id: 'group', type: 'G'},
+    open: {id: 'open', type: 'O'},
+};
+
+const POSTS = {
+    theirs: {id: 'theirs', user_id: 'other', channel_id: 'dm', create_at: 1000},
+    mine: {id: 'mine', user_id: 'me', channel_id: 'dm', create_at: 1000},
+    elsewhere: {id: 'elsewhere', user_id: 'other', channel_id: 'group', create_at: 1000},
+    deleted: {id: 'deleted', user_id: 'other', channel_id: 'dm', create_at: 1000, delete_at: 5},
+    reply: {id: 'reply', user_id: 'other', channel_id: 'dm', create_at: 1000, root_id: 'theirs'},
+    inOpen: {id: 'inOpen', user_id: 'other', channel_id: 'open', create_at: 1000},
+};
+
+const state = (enabled: string | null, currentChannelId = 'dm') => makeGlobalState({
+    currentChannelId,
+    channels: CHANNELS,
+    posts: POSTS,
+    plugin: {config: enabled === null ? null : {enabled_channel_types: enabled}},
+});
 
 describe('getPostContext', () => {
     it('returns null for an unknown post', () => {
-        expect(getPostContext(makeState(), 'nope')).toBeNull();
+        expect(getPostContext(state('DGPO'), 'nope')).toBeNull();
     });
 
-    it('describes ownership, channel type and current channel', () => {
-        const ctx = getPostContext(makeState(), 'mine');
-        expect(ctx).toMatchObject({
-            channelId: 'dm1',
-            createAt: 200,
-            isOwn: true,
+    it('describes ownership, channel type, thread position and current channel', () => {
+        expect(getPostContext(state('DGPO'), 'theirs')).toEqual({
+            postId: 'theirs',
+            channelId: 'dm',
+            createAt: 1000,
+            isOwn: false,
             isDM: true,
+            isEligibleChannel: true,
             isCurrentChannel: true,
             isDeleted: false,
+            isThreadReply: false,
         });
+    });
+
+    it('follows the server configuration for eligibility', () => {
+        expect(getPostContext(state('D'), 'inOpen')?.isEligibleChannel).toBe(false);
+        expect(getPostContext(state('DO'), 'inOpen')?.isEligibleChannel).toBe(true);
     });
 });
 
 describe('shouldReportRead', () => {
-    it('reports someone else post in the open DM', () => {
-        expect(shouldReportRead(makeState(), 'theirs')).toBe(true);
+    it('reports someone else post in the open channel', () => {
+        expect(shouldReportRead(state('DGPO'), 'theirs')).toBe(true);
     });
 
     it('never reports own post', () => {
-        expect(shouldReportRead(makeState(), 'mine')).toBe(false);
+        expect(shouldReportRead(state('DGPO'), 'mine')).toBe(false);
     });
 
-    it('does not report a post of a DM that is not currently open', () => {
-        expect(shouldReportRead(makeState(), 'otherChannel')).toBe(false);
-    });
-
-    it('reports posts in an eligible open channel', () => {
-        const state = makeState();
-        state.entities.channels.currentChannelId = 'town';
-        expect(shouldReportRead(state, 'inTown')).toBe(true);
+    it('does not report a post of a channel that is not currently open', () => {
+        expect(shouldReportRead(state('DGPO'), 'elsewhere')).toBe(false);
     });
 
     it('does not report deleted posts', () => {
-        expect(shouldReportRead(makeState(), 'deleted')).toBe(false);
+        expect(shouldReportRead(state('DGPO'), 'deleted')).toBe(false);
     });
 
     it('does not report unknown posts', () => {
-        expect(shouldReportRead(makeState(), 'nope')).toBe(false);
+        expect(shouldReportRead(state('DGPO'), 'nope')).toBe(false);
+    });
+
+    it('does not report thread replies', () => {
+        // A reply shares its root's channel, so tracking it would let a reply read
+        // in the sidebar advance the channel watermark over older messages.
+        expect(shouldReportRead(state('DGPO'), 'reply')).toBe(false);
+    });
+
+    it('does not report in a channel type the administrator disabled', () => {
+        expect(shouldReportRead(state('GPO'), 'theirs')).toBe(false);
+    });
+
+    it('does not report before the configuration is known', () => {
+        expect(shouldReportRead(state(null), 'theirs')).toBe(false);
     });
 });

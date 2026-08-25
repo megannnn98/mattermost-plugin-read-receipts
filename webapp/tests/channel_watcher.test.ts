@@ -1,4 +1,5 @@
-import {collectOwnPostIds, isEligibleChannel, RETRY_BASE_MS, startChannelWatcher} from '../src/channel_watcher';
+import {collectOwnPostIds, isEligibleChannel, REFRESH_DEBOUNCE_MS, RETRY_BASE_MS, startChannelWatcher} from '../src/channel_watcher';
+import {pluginBranch, BRANCH} from './helpers';
 import * as actions from '../src/actions';
 import {ACTION_TYPES} from '../src/reducer';
 import * as client from '../src/client';
@@ -11,8 +12,9 @@ jest.mock('../src/client', () => ({
 
 const mockedFetch = client.fetchChannelReceipts as jest.MockedFunction<typeof client.fetchChannelReceipts>;
 
-function makeState() {
+function makeState(enabledChannelTypes: string | null = 'DGPO') {
     return {
+        [BRANCH]: pluginBranch({config: enabledChannelTypes === null ? null : {enabled_channel_types: enabledChannelTypes}}),
         entities: {
             users: {currentUserId: 'me'},
             channels: {
@@ -29,10 +31,11 @@ function makeState() {
                     p2: {id: 'p2', user_id: 'other', channel_id: 'dm1', create_at: 200},
                     p3: {id: 'p3', user_id: 'me', channel_id: 'dm1', create_at: 300, delete_at: 301},
                     p4: {id: 'p4', user_id: 'me', channel_id: 'dm1', create_at: 400},
+                    p5: {id: 'p5', user_id: 'me', channel_id: 'dm1', create_at: 500, root_id: 'p1'},
                     q1: {id: 'q1', user_id: 'me', channel_id: 'dm2', create_at: 500},
                 },
                 postsInChannel: {
-                    dm1: [{order: ['p1']}, {order: ['p4', 'p3', 'p2'], recent: true}],
+                    dm1: [{order: ['p1']}, {order: ['p5', 'p4', 'p3', 'p2'], recent: true}],
                     dm2: [{order: ['q1'], recent: true}],
                 },
             },
@@ -164,16 +167,29 @@ describe('isEligibleChannel', () => {
         expect(isEligibleChannel(makeState(), 'missing')).toBeNull();
     });
 
-    it('detects DM and non-DM channels', () => {
-        expect(isEligibleChannel(makeState(), 'dm1')).toBe(true);
-        expect(isEligibleChannel(makeState(), 'town')).toBe(true);
+    it('follows the server configuration rather than a hard-coded list', () => {
+        expect(isEligibleChannel(makeState('DGPO'), 'dm1')).toBe(true);
+        expect(isEligibleChannel(makeState('DGPO'), 'town')).toBe(true);
+        expect(isEligibleChannel(makeState('D'), 'town')).toBe(false);
+        expect(isEligibleChannel(makeState('GPO'), 'dm1')).toBe(false);
+    });
+
+    it('waits instead of guessing while the configuration is unknown', () => {
+        // Null means "not decidable yet". Treating it as enabled would report
+        // reads the server is about to refuse; treating it as disabled would mark
+        // the channel handled and never load it.
+        expect(isEligibleChannel(makeState(null), 'dm1')).toBeNull();
+    });
+
+    it('is null for a channel that has not loaded', () => {
+        expect(isEligibleChannel(makeState(), 'nope')).toBeNull();
     });
 });
 
 describe('startChannelWatcher', () => {
     beforeEach(() => {
         mockedFetch.mockReset();
-        mockedFetch.mockResolvedValue({watermark: null, receipts: {}});
+        mockedFetch.mockResolvedValue({posts: {}, truncated: false});
     });
 
     it('loads receipts for the DM that is open at startup', async () => {
@@ -377,7 +393,7 @@ describe('startChannelWatcher', () => {
         jest.useFakeTimers();
         const loader = jest.spyOn(actions, 'loadChannelReceipts');
         loader.mockRejectedValueOnce(new Error('boom'));
-        mockedFetch.mockResolvedValue({watermark: null, receipts: {}});
+        mockedFetch.mockResolvedValue({posts: {}, truncated: false});
         const store = makeStore(makeState());
         const watcher = startChannelWatcher(store);
 
@@ -411,6 +427,90 @@ describe('startChannelWatcher', () => {
         expect(mockedFetch).toHaveBeenCalledTimes(1);
 
         error.mockRestore();
+        jest.useRealTimers();
+    });
+});
+
+describe('channel eligibility drives the watcher', () => {
+    beforeEach(() => {
+        mockedFetch.mockReset();
+        mockedFetch.mockResolvedValue({posts: {}, truncated: false});
+    });
+
+    function watcherOn(state: ReturnType<typeof makeState>) {
+        const listeners: Array<() => void> = [];
+        const store = {
+            getState: () => state,
+            dispatch: jest.fn(),
+            subscribe: (listener: () => void) => {
+                listeners.push(listener);
+                return () => listeners.splice(listeners.indexOf(listener), 1);
+            },
+        };
+        return {watcher: startChannelWatcher(store as never), store, notify: () => listeners.forEach((l) => l())};
+    }
+
+    it('does not query a channel type the administrator disabled', async () => {
+        const state = makeState('G');
+        const {watcher} = watcherOn(state);
+        await flush();
+
+        expect(mockedFetch).not.toHaveBeenCalled();
+        watcher.stop();
+    });
+
+    it('does not query anything before the configuration has arrived', async () => {
+        const {watcher} = watcherOn(makeState(null));
+        await flush();
+
+        expect(mockedFetch).not.toHaveBeenCalled();
+        watcher.stop();
+    });
+
+    it('never asks about thread replies', async () => {
+        const {watcher} = watcherOn(makeState());
+        await flush();
+
+        expect(mockedFetch).toHaveBeenCalledTimes(1);
+        const [, postIds] = mockedFetch.mock.calls[0];
+        // p5 is a reply; asking about it would put a reply's read into the
+        // channel watermark and mark every older channel message read.
+        expect(postIds).not.toContain('p5');
+        expect(postIds).toContain('p4');
+        watcher.stop();
+    });
+
+    it('coalesces a burst of websocket receipts into one re-query', async () => {
+        jest.useFakeTimers();
+        const {watcher} = watcherOn(makeState());
+        await Promise.resolve();
+        await Promise.resolve();
+        mockedFetch.mockClear();
+
+        watcher.refreshSoon();
+        watcher.refreshSoon();
+        watcher.refreshSoon();
+        expect(mockedFetch).not.toHaveBeenCalled();
+
+        jest.advanceTimersByTime(REFRESH_DEBOUNCE_MS);
+        expect(mockedFetch).toHaveBeenCalledTimes(1);
+
+        watcher.stop();
+        jest.useRealTimers();
+    });
+
+    it('stop() cancels a pending coalesced re-query', async () => {
+        jest.useFakeTimers();
+        const {watcher} = watcherOn(makeState());
+        await Promise.resolve();
+        await Promise.resolve();
+        mockedFetch.mockClear();
+
+        watcher.refreshSoon();
+        watcher.stop();
+        jest.advanceTimersByTime(REFRESH_DEBOUNCE_MS * 2);
+
+        expect(mockedFetch).not.toHaveBeenCalled();
         jest.useRealTimers();
     });
 });

@@ -1,3 +1,4 @@
+import {isChannelTypeEnabled} from './selectors';
 import {GlobalState} from './types';
 
 export interface PostContext {
@@ -9,6 +10,7 @@ export interface PostContext {
     isEligibleChannel: boolean;
     isCurrentChannel: boolean;
     isDeleted: boolean;
+    isThreadReply: boolean;
 }
 
 export function getPostContext(state: GlobalState, postId: string): PostContext | null {
@@ -26,21 +28,28 @@ export function getPostContext(state: GlobalState, postId: string): PostContext 
         createAt: post.create_at,
         isOwn: post.user_id === state?.entities?.users?.currentUserId,
         isDM: channel?.type === 'D',
-        isEligibleChannel: Boolean(channel && 'DGPO'.includes(channel.type)),
+        isEligibleChannel: isChannelTypeEnabled(state, channel?.type),
         isCurrentChannel: channelId === state?.entities?.channels?.currentChannelId,
         isDeleted: Boolean(post.delete_at) || post.state === 'DELETED',
+        isThreadReply: Boolean(post.root_id),
     };
 }
 
 /**
- * A receipt may only be reported for someone else's post in the currently open
- * DM channel. The current-channel check keeps search results, permalink views
- * and RHS previews of other channels from silently marking posts as read.
+ * A receipt may only be reported for someone else's root post in the channel that
+ * is currently open, and only in a channel type the server is collecting for.
+ *
+ * Thread replies are deliberately out of scope for this version. A reply lives in
+ * the same channel as its root, so without this check a reply that happened to be
+ * rendered — in the right-hand sidebar, in the global threads view — would be
+ * tracked as if it had been read in the channel, and its watermark would then mark
+ * every older channel message read too. The current-channel check keeps search
+ * results and permalink views out for the same reason.
  */
 export function shouldReportRead(state: GlobalState, postId: string): boolean {
     const ctx = getPostContext(state, postId);
     if (!ctx) {
         return false;
     }
-    return ctx.isEligibleChannel && ctx.isCurrentChannel && !ctx.isOwn && !ctx.isDeleted;
+    return ctx.isEligibleChannel && ctx.isCurrentChannel && !ctx.isOwn && !ctx.isDeleted && !ctx.isThreadReply;
 }

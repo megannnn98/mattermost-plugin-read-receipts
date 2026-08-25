@@ -5,7 +5,7 @@ import {PLUGIN_ID} from './client';
 import ReadReceipt from './components/read_receipt';
 import {setStore} from './store_ref';
 import {ChannelWatcher, startChannelWatcher} from './channel_watcher';
-import {resetDeduplicator} from './actions';
+import {loadPluginConfig, resetDeduplicator} from './actions';
 import {resetVisibilityTracker} from './visibility';
 import {PluginRegistry, PluginStore} from './types';
 
@@ -29,15 +29,24 @@ export class ReadReceiptsPlugin {
         registry.registerReducer(reducer);
 
         registry.registerWebSocketEventHandler(WS_EVENT, (msg) => {
-            handleWebSocketEvent(msg, store);
+            handleWebSocketEvent(msg, store, () => this.watcher?.refreshSoon());
         });
 
         registry.registerPostMessageAttachmentComponent(ReadReceipt);
 
         this.watcher = startChannelWatcher(store);
 
+        // Until the configuration lands the plugin stays inert: no indicator, no
+        // read report. Dispatching it wakes the watcher through its own store
+        // subscription, so nothing else needs to be scheduled here.
+        loadPluginConfig(store);
+
         if (typeof registry.registerReconnectHandler === 'function') {
             registry.registerReconnectHandler(() => {
+                // A reconnect is the point at which an administrator's change to
+                // the setting can have happened without this client hearing about
+                // it, so the configuration is re-read alongside the receipts.
+                loadPluginConfig(store);
                 this.watcher?.refresh();
             });
         }
