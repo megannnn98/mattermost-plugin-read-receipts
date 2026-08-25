@@ -84,22 +84,9 @@ func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Ch
 	ttlSeconds := config.retentionSeconds()
 	now := nowMillis()
 
-	wm, err := p.getWatermark(channel.Id, readerID)
+	wmAdvanced, err := p.advanceWatermark(channel.Id, readerID, post, now)
 	if err != nil {
 		return nil, err
-	}
-
-	wmAdvanced := wm == nil || post.CreateAt > wm.CreateAt
-
-	if wmAdvanced {
-		newWM := &Watermark{
-			PostID:   post.Id,
-			CreateAt: post.CreateAt,
-			ReadAt:   now,
-		}
-		if err := p.setWatermark(channel.Id, readerID, newWM); err != nil {
-			return nil, err
-		}
 	}
 
 	written, err := p.setReceiptAtomic(channel.Id, post.Id, readerID, now, ttlSeconds)
