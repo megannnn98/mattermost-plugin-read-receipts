@@ -13,14 +13,18 @@ GOFLAGS ?= -ldflags '-s -w'
 PLUGIN_TARGETS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 
 .PHONY: all check-style check-style-server check-style-webapp dist server webapp \
-        test test-server test-webapp node-deps clean
+        test test-server test-webapp node-deps node-deps-update clean
 
 all: check-style test dist
 
 node-deps:
-	@test -d webapp/node_modules || (cd webapp && npm install --silent)
+	@test -d webapp/node_modules || (cd webapp && npm ci --silent)
+
+node-deps-update:
+	cd webapp && npm install
 
 server:
+	@mkdir -p server/dist
 	@cd server && for target in $(PLUGIN_TARGETS); do \
 		os=$${target%/*}; arch=$${target#*/}; ext=""; \
 		if [ "$$os" = "windows" ]; then ext=".exe"; fi; \
