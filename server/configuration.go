@@ -1,14 +1,18 @@
 package main
 
+import "strings"
+
 const (
 	defaultRetentionDays = 30
 	minRetentionDays     = 1
 	maxRetentionDays     = 3650
+	defaultChannelTypes  = "DGPO"
 )
 
 type configuration struct {
-	EnableDebugLogging   bool `json:"EnableDebugLogging"`
-	ReceiptRetentionDays int  `json:"ReceiptRetentionDays"`
+	EnableDebugLogging   bool   `json:"EnableDebugLogging"`
+	ReceiptRetentionDays int    `json:"ReceiptRetentionDays"`
+	EnabledChannelTypes  string `json:"EnabledChannelTypes"`
 }
 
 func (c *configuration) Clone() *configuration {
@@ -49,6 +53,7 @@ func (c *configuration) validate() (*configuration, []string) {
 		return &configuration{
 			EnableDebugLogging:   false,
 			ReceiptRetentionDays: defaultRetentionDays,
+			EnabledChannelTypes:  defaultChannelTypes,
 		}, []string{"configuration is empty — using defaults"}
 	}
 
@@ -66,7 +71,32 @@ func (c *configuration) validate() (*configuration, []string) {
 		valid.ReceiptRetentionDays = maxRetentionDays
 	}
 
+	valid.EnabledChannelTypes = normalizeChannelTypes(valid.EnabledChannelTypes)
+	if valid.EnabledChannelTypes == "" {
+		warnings = append(warnings, "EnabledChannelTypes has no valid channel types; using default")
+		valid.EnabledChannelTypes = defaultChannelTypes
+	}
+
 	return valid, warnings
+}
+
+func normalizeChannelTypes(types string) string {
+	var normalized strings.Builder
+	for _, channelType := range strings.ToUpper(types) {
+		if !strings.ContainsRune(defaultChannelTypes, channelType) || strings.ContainsRune(normalized.String(), channelType) {
+			continue
+		}
+		normalized.WriteRune(channelType)
+	}
+	return normalized.String()
+}
+
+func (c *configuration) channelTypeEnabled(channelType string) bool {
+	types := defaultChannelTypes
+	if c != nil && c.EnabledChannelTypes != "" {
+		types = c.EnabledChannelTypes
+	}
+	return strings.Contains(types, channelType)
 }
 
 // applyConfiguration validates the raw config, stores the clamped copy and logs
