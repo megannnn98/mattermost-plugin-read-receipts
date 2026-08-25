@@ -77,8 +77,7 @@ func (p *Plugin) handleRead(w http.ResponseWriter, r *http.Request) {
 		ReadAt:    receipt.ReadAt,
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	p.writeJSON(w, resp)
 }
 
 func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Channel) (*Receipt, error) {
@@ -240,8 +239,17 @@ func (p *Plugin) handleQuery(w http.ResponseWriter, r *http.Request) {
 		Receipts:  receipts,
 	}
 
+	p.writeJSON(w, resp)
+}
+
+// writeJSON encodes resp as the response body. An encoding failure can only
+// happen once the status line is already out, so it is logged rather than
+// turned into an error response.
+func (p *Plugin) writeJSON(w http.ResponseWriter, resp any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		p.logWarn("write response failed", "error", err.Error())
+	}
 }
 
 func (p *Plugin) getConfiguration() *configuration {

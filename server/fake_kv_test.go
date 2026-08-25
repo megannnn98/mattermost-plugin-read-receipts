@@ -41,10 +41,6 @@ func (f *fakeKV) get(key string) []byte {
 	return cp
 }
 
-func (f *fakeKV) getUnsafe(key string) []byte {
-	return f.m[key]
-}
-
 // get is the KVGet backing function: returns a copy so the caller mutating the
 // returned bytes cannot race with the store, matching Mattermost's semantics.
 func (f *fakeKV) kvGet(key string) ([]byte, *model.AppError) {
