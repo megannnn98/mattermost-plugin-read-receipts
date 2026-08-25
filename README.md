@@ -1,6 +1,6 @@
 # Read Receipts Plugin for Mattermost
 
-Плагин для отображения индикаторов прочтения сообщений в 1:1 DM-переписках в Mattermost Desktop.
+Плагин для отображения индикаторов прочтения сообщений в каналах D, G, P и O Mattermost Desktop.
 
 ## Requirements
 
@@ -14,7 +14,8 @@ Webapp Mattermost 9.5+ предоставляет плагинам React 17.0.2.
 
 ## Features
 
-- Индикатор `✓✓ Прочитано HH:MM` под собственными сообщениями в DM, когда получатель прочитал
+- Inline-индикатор `✓✓` сразу после текста сообщения (DM) и `✓✓ N` в остальных каналах — высоту поста не увеличивает
+- По клику на групповой индикатор автор получает список читателей и время прочтения
 - Работает **только в Mattermost Desktop** (детект через `window.desktopAPI.getAppInfo()`)
 - Учёт фокуса окна, видимости поста (IntersectionObserver), активности пользователя, dwell-time 1 секунда
 - Монохромный watermark: индикатор никогда не «пропадает»
@@ -25,7 +26,8 @@ Webapp Mattermost 9.5+ предоставляет плагинам React 17.0.2.
 ## Limitations
 
 - **Только Mattermost Desktop**: в браузере плагин не регистрирует ни компонентов, ни обработчиков. Детект — best-effort по `window.desktopAPI`, не защита от подделки.
-- **Только DM 1:1** (`channel.type == "D"`): Group DM, public/private каналы, threads — вне MVP.
+- Типы каналов D/G/P/O включены по умолчанию; администратор может сузить их через `EnabledChannelTypes`.
+- В очень людных каналах индекс хранит до 1000 читателей, а query/popover читают не более 200; результат может быть усечён.
 - **Зависимости от внутренних деталей Mattermost**:
   - слот `PostMessageAttachment` (не рендерится для удалённых постов, постов с plugin post type и при `enableFormatting=false`)
   - формат `custom_<pluginid>_<event>`
@@ -44,7 +46,7 @@ make test     # только тесты
 make dist     # только сборка dist/*.tar.gz
 ```
 
-Результат: `dist/com.integrasources.read-receipts-0.1.0.tar.gz`
+Результат: `dist/com.integrasources.read-receipts-0.2.0.tar.gz`
 
 Зависимости webapp ставятся воспроизводимо через `npm ci` (по lock-файлу). Для
 обновления зависимостей и перегенерации lock-файла — `make node-deps-update`
@@ -53,15 +55,16 @@ make dist     # только сборка dist/*.tar.gz
 
 ## Install
 
-1. Скачайте `com.integrasources.read-receipts-0.1.0.tar.gz` со страницы
+1. Скачайте `com.integrasources.read-receipts-0.2.0.tar.gz` со страницы
    [Releases](https://github.com/megannnn98/mattermost-plugin-read-receipts/releases/latest)
-   (или соберите сами: `make dist` → `dist/com.integrasources.read-receipts-0.1.0.tar.gz`)
+   (или соберите сами: `make dist` → `dist/com.integrasources.read-receipts-0.2.0.tar.gz`)
 2. Откройте **System Console → Plugins → Upload**
 3. Загрузите `.tar.gz`
 4. Включите плагин: **System Console → Plugins → Read Receipts → Enable**
 5. Настройте параметры:
    - **Enable debug logging**: включите для отладки (логирует только ID постов/пользователей)
    - **Receipt retention (days)**: сколько дней хранить точное время прочтения (по умолчанию 30)
+   - **Enabled channel types**: аварийный тормоз типов каналов, по умолчанию `DGPO`
 
 Или через `mmctl`:
 
@@ -84,13 +87,22 @@ make check-style   # gofmt -l (fail при расхождении) + go vet + es
 Покрыто (server, `plugintest`-моки на fakeKV с настоящей CAS-семантикой): создание
 и повторный receipt (идемпотентность, first-write-wins), watermark не откатывается
 назад (монотонность под конкурентностью N горутин, `-race`), изоляция receipt между
-каналами (post из чужого DM не отдаётся), частичные сбои KV (запись receipt падает —
+каналами (post из чужого канала не отдаётся), частичные сбои KV (запись receipt падает —
 watermark не тронут и 500; CAS watermark падает — 500 и без WS), 401 без
-`Mattermost-User-Id` (оба эндпоинта), 403 для постороннего пользователя / автора
-собственного поста / не-DM канала, identity только из заголовка (id в теле
+`Mattermost-User-Id` (все эндпоинты), 403 для постороннего пользователя / автора
+собственного поста / выключенного типа канала, identity только из заголовка (id в теле
 игнорируется), query-лимит (макс 200, невалидные id отбрасываются), битый JSON /
 пустой channel_id / тело больше лимита → 4xx, клампинг `ReceiptRetentionDays`
 (0, отрицательное, 1e9).
+
+Групповая часть покрыта отдельно: CAS индекса читателей под `-race` (N одновременных первых
+читателей — все попадают в индекс ровно по разу), повторное чтение не пишет в KV, переполнение
+`maxIndexReaders` не ошибка, самолечение установки без `idx_` (в том числе на пути
+watermark-authority), запрос в группе (watermark на читателя, сам запрашивающий исключён),
+правило «точные receipts только при одном читателе», усечение списка читателей, каждый тип
+канала при `EnabledChannelTypes=DGPO` и 403 при его исключении, `/receipts/post` (не-автор → 403,
+удалённый пост → 404, точное и приближённое время, watermark не читается при наличии receipt,
+усечение, ошибка индекса → 500).
 
 Повтор после сбоя записи watermark сохраняет исходный `receipt.ReadAt`: если
 per-post receipt уже был записан, retry не может сделать `watermark.ReadAt`
@@ -101,7 +113,8 @@ per-post receipt уже был записан, retry не может сдела�
 (загрузка при открытии, один раз на канал, переключение канала, ожидание постов, `refresh()`,
 `stop()`, переключение канала во время in-flight запроса не теряется, порядок «новые первыми»),
 websocket-обработчик (совпадение события, приведение типов, игнор мусора, отбрасывание события
-с чужим `author_id`), i18n, visibility-трекер, `visibility_ratio` (низкий ratio → нет отправки,
+с чужим `author_id`, игнор события без `reader_id`), per-reader reducer (читатели канала
+независимы, watermark читателя не откатывается, receipts разных читателей мержатся), i18n, visibility-трекер, `visibility_ratio` (низкий ratio → нет отправки,
 высокий → dwell, падение ниже порога во время dwell отменяет отправку, progression tall-post fallback
 по `intersectionRect.height`), `usePluginSelector` (селективность: нет rerender на нерелевантный
 action, React 17 runtime), локальное чтение не помечает свои посты прочитанными (нет dispatch, id в
@@ -152,9 +165,9 @@ mattermost-plugin-read-receipts/
 ├── plugin.json          # манифест (min_server_version 9.5.0, settings_schema)
 ├── server/
 │   ├── plugin.go        # OnActivate/OnConfigurationChange, router
-│   ├── api.go           # POST /api/v1/read, POST /api/v1/receipts/query
-│   ├── permissions.go   # DM-only + membership + «не автор» проверки
-│   ├── receipts.go      # KV storage (watermark + per-post)
+│   ├── api.go           # POST /api/v1/read, /receipts/query, /receipts/post
+│   ├── permissions.go   # тип канала + membership + «не автор» проверки
+│   ├── receipts.go      # KV storage (watermark + per-post + индекс читателей)
 │   └── *_test.go        # серверные тесты (plugintest моки)
 ├── assets/icon.svg      # иконка из icon_path манифеста
 └── webapp/
@@ -163,11 +176,12 @@ mattermost-plugin-read-receipts/
     ├── src/desktop.ts           # isDesktopClient() через window.desktopAPI
     ├── src/client.ts            # fetch + X-CSRF-Token + X-Requested-With
     ├── src/actions.ts           # loadChannelReceipts(), sendReadReceipt() (дедупликация)
-    ├── src/channel_watcher.ts   # догрузка receipts при открытии DM и на reconnect
+    ├── src/channel_watcher.ts   # догрузка receipts при открытии канала и на reconnect
     ├── src/gating.ts            # getPostContext(), shouldReportRead() — правила «можно ли»
     ├── src/i18n.ts              # словарь en/ru + форматирование времени
     ├── src/reducer.ts           # Redux reducer
-    ├── src/selectors.ts         # isPostRead(), selectPostReadAt()
+    ├── src/selectors.ts         # selectPostReadCount(), selectSingleReaderReadAt()
+    ├── src/inline_mount.ts       # портал индикатора в текст сообщения (+ fallback-оверлей)
     ├── src/visibility.ts        # focus/visibility/idle трекер
     ├── src/websocket.ts         # custom_<id>_read_receipt handler
     └── src/components/read_receipt.tsx  # UI-компонент + IntersectionObserver
@@ -199,14 +213,23 @@ window.registerPlugin('com.integrasources.read-receipts', new ReadReceiptsPlugin
 **Per-post receipt** (`rr_<channelID>_<postID>_<readerID>`):
 - `read_at` (int64), `ExpireInSeconds = ReceiptRetentionDays*86400`
 - Запись только если ключа ещё нет (Atomic: true, OldValue: nil) → «first write wins», повторный read полностью идемпотентен
-- Ключ **скоуплен по каналу** (`channelID` всегда берётся из провалидированного `channel.Id`): receipt существует ⟺ `readerID` прочитал `postID` в `channelID`. Автор поста — всегда сам запрашивающий (само-чтение запрещено `ErrAuthorSelfRead`, DM всегда 1:1), поэтому передача `post_id` из чужого канала ничего не отдаёт: ключ не совпадёт. Это структурная гарантия без лишних `GetPost` на каждый id (до 200 вызовов на открытие DM были бы недопустимой просадкой).
+- Ключ **скоуплен по каналу** (`channelID` всегда берётся из провалидированного `channel.Id`): receipt существует ⟺ `readerID` прочитал `postID` в `channelID`. Передача `post_id` из чужого канала ничего не отдаёт — ключ не совпадёт. Это структурная гарантия без лишних `GetPost` на каждый id (до 200 вызовов на открытие канала были бы недопустимой просадкой).
 - **Миграции нет**: версия `0.1.0` не имеет публичных установок. Старые `rr_<postID>_<readerID>`-ключи имеют TTL и истекают сами в течение `ReceiptRetentionDays`; формат `wm_*` не меняется.
+
+**Индекс читателей канала** (`idx_<channelID>`):
+- JSON-массив user id всех, кто хоть раз что-то прочитал в этом канале; без TTL
+- Нужен потому, что `pluginapi.WithPrefix` — это **клиентский фильтр поверх полного `KVList`**, то есть перебор всех ключей инсталляции; для вопроса «кто читал этот канал» он непригоден
+- Пишется через CAS (`Atomic: true, OldValue: <прочитанные байты>`), **один раз на пару (канал, читатель)** — дальше на каждое чтение приходится ровно один `KVGet`
+- Ретраев у этого CAS **64**, а не 5 как у watermark'а: проигравший CAS на watermark обычно выходит сразу («уже покрыто»), а каждый первый читатель канала обязан дописаться, поэтому число нужных попыток растёт с числом одновременных первых читателей. Исчерпание ретраев возвращает ошибку (`/read` → 500, клиент повторит по backoff), а не молча теряет читателя
+- Индекс поддерживается **до** early-return по watermark-authority, поэтому установка, обновившаяся с `0.1.0` (есть `wm_`, нет `idx_`), самолечится на первом же чтении
+- Ёмкость — `maxIndexReaders = 1000`; переполнение логируется и не является ошибкой (см. «Остаточные риски»)
 
 **Водмарк — атомарный (CAS)**: обновление через `KVSetWithOptions{Atomic: true, OldValue: <прочитанные байты>}` в цикле (до 5 попыток). Это гарантирует «watermark никогда не движется назад» даже при конкурентных запросах (процессный lock не сработал бы — плагин может работать не в одном процессе).
 
-Ответ «прочитано?» для поста:
-- `post.create_at <= watermark.create_at` → прочитано
-- Точное время — из `rr_*`, иначе (старше TTL) — `watermark.read_at` как приближение
+Ответ «прочитано?» для поста и **числа прочитавших**:
+- читатель покрыл пост, если есть его `rr_*` **или** `post.create_at <= watermark.create_at`
+- счётчик считается **на клиенте** из watermark'ов: watermark монотонен, а `create_at` своих постов у клиента уже есть, поэтому сервер не делает `GetPost` ни на один `post_id`
+- точное время — из `rr_*`, иначе (старше TTL) — `watermark.read_at` как приближение (в UI помечается `≈`)
 
 ### REST API
 
@@ -219,7 +242,7 @@ window.registerPlugin('com.integrasources.read-receipts', new ReadReceiptsPlugin
 Проверки:
 - `Mattermost-User-Id` присутствует
 - Пост существует
-- Канал типа D (DM)
+- Тип канала входит в `EnabledChannelTypes` (по умолчанию `DGPO`)
 - Вызывающий — участник канала (`HasPermissionToChannel(..., PermissionReadChannel)`)
 - Вызывающий ≠ автор поста
 
@@ -229,9 +252,45 @@ window.registerPlugin('com.integrasources.read-receipts', new ReadReceiptsPlugin
 ```json
 {"channel_id": "...", "post_ids": ["..."]}
 ```
-→ `{"watermark": {...} | null, "receipts": {"<post_id>": read_at}}`
+→
+```json
+{
+  "watermarks": [{"reader_id": "...", "post_id": "...", "create_at": 0, "read_at": 0}],
+  "receipts": {"<post_id>": {"<reader_id>": 0}},
+  "truncated": false
+}
+```
 
-Возвращаются данные другого участника DM; вызывающий обязан быть участником, канал — D. Self-DM («личные заметки», канал типа D с единственным участником) отдаёт `200` с пустым результатом — читать эти посты некому, поэтому KV не трогается вовсе; `post_ids` ограничены (max 200, первый 200), мусорные/пустые id отбрасываются, невалидный id фильтруется до запроса в KV. Получаемые receipts читаются по ключам провалидированного `channel.Id` — посты, принадлежащие другому каналу, ничего не возвращают (изоляция каналов). Тело запроса и ответа ограничены (64 KiB), весь трафик идёт с `X-CSRF-Token`/`X-Requested-With`.
+Читатели берутся из `idx_<channelID>`, сам запрашивающий из списка исключается, список
+обрезается до `maxQueryReaders = 200` (тогда `truncated: true`). Пустой индекс (в том числе
+self-DM, «личные заметки») отдаёт `200` с пустым результатом, не трогая `wm_`/`rr_` вовсе.
+
+**Точные per-post receipts отдаются только когда читатель ровно один** — то есть на практике в
+DM, где это в точности сохраняет контракт `0.1.0`. При K > 1 они стоили бы K·M чтений на
+открытие канала, поэтому в группах точные времена отдаёт `/receipts/post` по клику, а
+количество клиент считает из watermark'ов.
+
+`post_ids` ограничены (max 200, первые 200), невалидные id отбрасываются до запроса в KV.
+Получаемые receipts читаются по ключам провалидированного `channel.Id` — посты другого канала
+ничего не возвращают (изоляция каналов). Тело запроса и ответа ограничены (64 KiB), весь трафик
+идёт с `X-CSRF-Token`/`X-Requested-With`.
+
+**Контракт приватности.** Участник канала видит watermark'и остальных участников этого канала —
+то есть «читатель R прочитал канал до момента T». Это канальные данные и ровно то, что фича и
+обещает. Пер-постовая детализация закрыта авторством (см. ниже).
+
+**POST `/plugins/.../api/v1/receipts/post`**
+```json
+{"post_id": "..."}
+```
+→ `{"readers": [{"user_id": "...", "read_at": 0, "exact": true}], "truncated": false}`
+
+Вызывается только при открытии списка «кто прочитал». Требует, чтобы запрашивающий **был автором**
+поста (иначе 403) — один `GetPost` на клик приемлем, в отличие от 200 вызовов на открытие канала.
+Удалённый пост → 404. Читатель попадает в ответ, если есть его точный receipt (`exact: true`)
+либо watermark покрывает пост (`exact: false`, время приближённое — receipt истёк по TTL).
+Watermark читается **только когда точного receipt нет**, иначе стоимость поповера удвоилась бы.
+Сортировка — по времени прочтения по возрастанию.
 
 ### WebSocket
 
@@ -256,13 +315,16 @@ window.registerPlugin('com.integrasources.read-receipts', new ReadReceiptsPlugin
 
 ### Загрузка сохранённых receipts (channel watcher)
 
-`startChannelWatcher(store)` подписывается на Redux store и один раз на открытый DM-канал
+`startChannelWatcher(store)` подписывается на Redux store и один раз на открытый канал
 запрашивает `/receipts/query` — так статус восстанавливается после перезапуска Desktop, без
 polling'а:
 
 - ждёт появления сущности канала и первых постов (`entities.posts.postsInChannel`);
 - отправляет только **свои** посты (максимум 200, новые первыми) — индикатор рисуется лишь отправителю;
-- не-DM каналы помечает обработанными и не трогает;
+- каналы неподдерживаемого типа помечает обработанными и не трогает;
+- ответ `403` (например, тип канала выключен в `EnabledChannelTypes`) считает окончательным:
+  канал помечается обработанным, backoff не запускается — повторять запрос, который может
+  быть только отклонён, бессмысленно;
 - `registerReconnectHandler` → `watcher.refresh()`: после переподключения WebSocket состояние
   перечитывается (события, пропущенные во время обрыва, не теряются).
 - Ошибка `/receipts/query` не помечает канал обработанным: один retry запускается через
@@ -349,10 +411,25 @@ Read — конечный автомат `idle → pending → sent`. Упавш
 получила бы отдельный контекст и не увидела бы переводы Mattermost.
 
 Компонент на слоте `PostMessageAttachment` (получает `postId`):
-- Пост не в DM, или удалён, или state плагина пуст → `null`
-- Свой пост и он прочитан → строка под текстом: `✓✓ Прочитано 17:42`
-- Свой пост не прочитан → `null`
+- Канал неподдерживаемого типа, пост удалён или state плагина пуст → `null`
 - Чужой пост → невидимый sentinel (`<span aria-hidden>`) с ref для `IntersectionObserver`
+- Свой пост, никто не прочитал → `null`
+- Свой пост в DM → `✓✓`, точное время в `title`
+- Свой пост в группе → `✓✓ N`, по клику — список «кто и когда»
+
+**Почему портал, а не просто другой CSS.** Слот `PostMessageAttachment` монтируется **блоком под
+сообщением** — именно это и добавляло лишнюю высоту, на которую пожаловался заказчик. Поэтому
+`inline_mount.ts` создаёт `<span>` последним ребёнком `.post-message__text` и рендерит индикатор
+туда через `createPortal`. Если контейнера текста нет (нестандартный вариант поста), используется
+запасная стратегия — абсолютный оверлей в правом нижнем углу `.post__body` (он `position:
+relative`); высоту она тоже не добавляет.
+
+Поповер со списком читателей портируется в `document.body`, а не остаётся внутри текста поста:
+`position: fixed` внутри предка с `transform` считался бы от этого предка, и поповер уехал бы.
+Он открывается сразу по клику — со строкой «Загрузка…», а при ошибке запроса со строкой ошибки:
+если рендерить его только по приходу данных, упавший запрос оставил бы открытый флаг без единого
+обработчика закрытия. Список ограничен 20 строками, дальше «и ещё N»; при усечении на сервере
+показывается «и ещё более N», а не выдуманная точная цифра.
 
 Сообщения/props постов не изменяются.
 
@@ -364,9 +441,12 @@ Read — конечный автомат `idle → pending → sent`. Упавш
 4. **A → B**: отправьте сообщение «test message»
 5. У **A** индикатора **нет** (сообщение не прочитано)
 6. **B** открывает DM с **A**, сообщение попадает в видимую область при активном окне
-7. У **A** **без reload** появляется `✓✓ Прочитано HH:MM`
+7. У **A** **без reload** появляется `✓✓` сразу после текста, и **высота поста не меняется**
 8. После перезапуска Desktop статус **сохраняется** (данные в KV)
 9. Если **B** открывает тот же DM в **браузере** — receipt **не отправляется** (в браузере нет `window.desktopAPI`)
+10. В групповом (G), приватном (P) и открытом (O) канале у **A** появляется `✓✓ N`, растущее по
+    мере чтения; клик открывает список читателей с временем
+11. После истечения `ReceiptRetentionDays` список показывает время с пометкой `≈`
 
 ## Dependencies on Mattermost Internals
 
@@ -374,10 +454,10 @@ Read — конечный автомат `idle → pending → sent`. Упавш
 
 **Server Plugin API** (стабильные, документированные):
 - `plugin.API.KVGet`, `KVSetWithOptions` — KV-хранилище
-- `plugin.API.GetPost`, `GetChannel`, `GetChannelMembers`, `HasPermissionToChannel`
+- `plugin.API.GetPost`, `GetChannel`, `HasPermissionToChannel`
 - `plugin.API.PublishWebSocketEvent`
 - `model.WebsocketBroadcast{UserId: ...}` — адресная доставка
-- `model.ChannelTypeDirect` — тип канала DM
+- `model.ChannelTypeDirect` / `Group` / `Private` / `Open` — типы каналов
 
 **Webapp Plugin Registry**:
 - `window.registerPlugin(id, instance)` — контракт точки входа бандла
@@ -398,6 +478,24 @@ Read — конечный автомат `idle → pending → sent`. Упавш
 **Клиентские детали**:
 - Cookie `MMCSRF` — CSRF-токен
 - Формат WS-событий: `custom_<pluginid>_<event>`
+
+## Остаточные риски
+
+Плагин включён для всех типов каналов (`DGPO`) и не ограничивает число участников — это
+осознанное решение заказчика. Стоимость при этом зависит не от числа участников канала, а от
+числа **реально читавших**, и ограничена сверху явными константами:
+
+- **Людный открытый канал.** Каждый читающий попадает в `idx_`. Открытие канала автором стоит
+  `min(K, 200)` чтений KV, открытие списка читателей — до `2·min(K, 200)`. Сверх 200 ответ
+  помечается `truncated`, и UI честно пишет «и ещё более N», а не выдумывает число. Аварийный
+  тормоз для администратора — настройка `EnabledChannelTypes`.
+- **Индекс не чистится.** У `idx_` нет TTL: ушедший из канала участник остаётся в списке и
+  тратит одно чтение. Автоматическая чистка сознательно отложена.
+- **Точное время в группах — только по клику.** До открытия списка видно количество, но не
+  времена: массовый запрос иначе стоил бы K·M чтений.
+- **Портал вставляет свой узел в DOM Mattermost.** Если очередная версия вебаппа начнёт его
+  вычищать, индикатор пропадёт (плагин при этом не сломается), и рабочей останется запасная
+  стратегия с оверлеем.
 
 ## License
 
