@@ -535,6 +535,40 @@ func TestValidate_ChannelTypesAreConfigurable(t *testing.T) {
 	}
 }
 
+func TestHandleConfig_ReportsTheEnabledChannelTypes(t *testing.T) {
+	p, _ := setupTestPlugin(t)
+	p.configuration.EnabledChannelTypes = "DG"
+
+	req := httptest.NewRequest("GET", "/api/v1/config", nil)
+	req.Header.Set("Mattermost-User-Id", validID("userCfg"))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(&plugin.Context{}, w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp configResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "DG", resp.EnabledChannelTypes)
+
+	anon := httptest.NewRequest("GET", "/api/v1/config", nil)
+	anonW := httptest.NewRecorder()
+	p.ServeHTTP(&plugin.Context{}, anonW, anon)
+	assert.Equal(t, http.StatusUnauthorized, anonW.Code)
+}
+
+func TestHandleConfig_FallsBackToTheDefaultWhenUnset(t *testing.T) {
+	p, _ := setupTestPlugin(t)
+	p.configuration.EnabledChannelTypes = ""
+
+	req := httptest.NewRequest("GET", "/api/v1/config", nil)
+	req.Header.Set("Mattermost-User-Id", validID("userCfg"))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(&plugin.Context{}, w, req)
+
+	var resp configResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, defaultChannelTypes, resp.EnabledChannelTypes)
+}
+
 func TestHandleQuery_NonMemberForbiddenInEveryChannelType(t *testing.T) {
 	for _, channelType := range []model.ChannelType{model.ChannelTypeGroup, model.ChannelTypePrivate, model.ChannelTypeOpen} {
 		t.Run(string(channelType), func(t *testing.T) {

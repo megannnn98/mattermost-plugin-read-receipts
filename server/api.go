@@ -15,6 +15,7 @@ func (p *Plugin) registerRoutes() {
 	p.router.HandleFunc("POST /api/v1/read", p.handleRead)
 	p.router.HandleFunc("POST /api/v1/receipts/query", p.handleQuery)
 	p.router.HandleFunc("POST /api/v1/receipts/post", p.handlePostReaders)
+	p.router.HandleFunc("GET /api/v1/config", p.handleConfig)
 }
 
 func (p *Plugin) ServeHTTP(c *plugin.Context, w http.ResponseWriter, r *http.Request) {
@@ -350,6 +351,22 @@ func (p *Plugin) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.writeJSON(w, response)
+}
+
+type configResponse struct {
+	EnabledChannelTypes string `json:"enabled_channel_types"`
+}
+
+// handleConfig lets the webapp gate itself on the same setting the server
+// enforces. Without it the client would have to discover a disabled channel type
+// by being refused, i.e. after it had already rendered an indicator and reported
+// a read.
+func (p *Plugin) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Mattermost-User-Id") == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	p.writeJSON(w, configResponse{EnabledChannelTypes: p.getConfiguration().enabledChannelTypes()})
 }
 
 type postReadersRequest struct {
