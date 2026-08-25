@@ -412,3 +412,30 @@ func TestMarkAsRead_CoveredPostPrefersStoredReceipt(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(4242), receipt.ReadAt, "the stored per-post receipt is the exact time")
 }
+
+// --- Self-DM ("personal notes") ---------------------------------------------
+
+// Mattermost's self-DM is a type-D channel with a single member. Nobody else
+// can read those posts, so the query must answer with an empty result instead
+// of failing with 500 every time the channel is opened.
+func TestHandleQuery_SelfDMReturnsEmptyResult(t *testing.T) {
+	p, api := setupTestPlugin(t)
+
+	userID := validID("userSelf")
+	channelID := validID("chanSelf")
+
+	api.On("GetChannel", channelID).Return(&model.Channel{Id: channelID, Type: model.ChannelTypeDirect}, nil)
+	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
+	api.On("GetChannelMembers", channelID, 0, 2).Return(model.ChannelMembers{{UserId: userID}}, nil)
+
+	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{validID("postSelf")}}), userID)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp queryResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Empty(t, resp.Receipts)
+	assert.Nil(t, resp.Watermark)
+
+	// No KV lookup is needed at all for a channel nobody else reads.
+	api.AssertNotCalled(t, "KVGet", mock.Anything)
+}

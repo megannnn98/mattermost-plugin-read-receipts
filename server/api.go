@@ -219,6 +219,13 @@ func (p *Plugin) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	otherUserID, err := p.getOtherDMMember(channel, userID)
 	if err != nil {
+		if errors.Is(err, ErrSelfDM) {
+			// The personal-notes DM: there is nobody else to read these posts,
+			// so the honest answer is "no receipts", not an error.
+			p.writeJSON(w, queryResponse{Receipts: map[string]int64{}})
+			return
+		}
+		p.logWarn("resolve DM member failed", "error", err.Error())
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

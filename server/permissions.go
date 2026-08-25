@@ -13,6 +13,7 @@ var (
 	ErrAuthorSelfRead  = errors.New("author cannot mark own post as read")
 	ErrPostNotFound    = errors.New("post not found")
 	ErrChannelNotFound = errors.New("channel not found")
+	ErrSelfDM          = errors.New("direct channel has no other member")
 )
 
 func (p *Plugin) validateReadRequest(userID, postID string) (*model.Post, *model.Channel, error) {
@@ -58,6 +59,10 @@ func (p *Plugin) validateQueryRequest(userID, channelID string) (*model.Channel,
 	return channel, nil
 }
 
+// getOtherDMMember returns the other participant of a 1:1 DM. Mattermost also
+// creates a self-DM (the "personal notes" channel, name `<id>__<id>`) which is
+// type D but has a single member; that case is reported as ErrSelfDM so callers
+// can answer with an empty result instead of failing.
 func (p *Plugin) getOtherDMMember(channel *model.Channel, userID string) (string, error) {
 	members, appErr := p.API.GetChannelMembers(channel.Id, 0, 2)
 	if appErr != nil {
@@ -68,6 +73,10 @@ func (p *Plugin) getOtherDMMember(channel *model.Channel, userID string) (string
 		if m.UserId != userID {
 			return m.UserId, nil
 		}
+	}
+
+	if len(members) > 0 {
+		return "", ErrSelfDM
 	}
 
 	return "", fmt.Errorf("other member not found in DM")
