@@ -35,11 +35,9 @@ func (p *Plugin) OnActivate() error {
 
 	var cfg configuration
 	if err := p.API.LoadPluginConfiguration(&cfg); err != nil {
-		p.client.Log.Warn("load plugin configuration failed", "error", err.Error())
+		p.logWarn("load plugin configuration failed", "error", err.Error())
 	}
-	p.configMu.Lock()
-	p.configuration = &cfg
-	p.configMu.Unlock()
+	p.applyConfiguration(&cfg)
 
 	return nil
 }
@@ -53,9 +51,7 @@ func (p *Plugin) OnConfigurationChange() error {
 	if err := p.API.LoadPluginConfiguration(&cfg); err != nil {
 		return err
 	}
-	p.configMu.Lock()
-	p.configuration = &cfg
-	p.configMu.Unlock()
+	p.applyConfiguration(&cfg)
 	return nil
 }
 

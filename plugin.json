@@ -34,7 +34,7 @@
                 "key": "ReceiptRetentionDays",
                 "display_name": "Receipt retention (days)",
                 "type": "number",
-                "help_text": "How many days per-post read timestamps are stored. After expiry only the watermark (fact of reading) remains with approximate time.",
+                "help_text": "How many days per-post read timestamps are stored (1…3650; values ≤ 0 fall back to 30). After expiry only the watermark (fact of reading) remains with approximate time.",
                 "default": 30,
                 "placeholder": "30"
             }

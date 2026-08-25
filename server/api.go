@@ -249,7 +249,20 @@ func (p *Plugin) getConfiguration() *configuration {
 func (p *Plugin) debugLog(msg string, kvPairs ...interface{}) {
 	config := p.getConfiguration()
 	if config.EnableDebugLogging {
-		args := append([]interface{}{"msg", msg}, kvPairs...)
-		p.client.Log.Debug("read-receipts", args...)
+		p.logDebug(msg, kvPairs...)
+	}
+}
+
+// logWarn and logDebug are nil-tolerant: in tests p.client is nil (the API is
+// plugged directly into the plugin), so direct p.client.Log calls would panic.
+func (p *Plugin) logWarn(msg string, kv ...interface{}) {
+	if p.client != nil {
+		p.client.Log.Warn(msg, kv...)
+	}
+}
+
+func (p *Plugin) logDebug(msg string, kv ...interface{}) {
+	if p.client != nil {
+		p.client.Log.Debug(msg, kv...)
 	}
 }
