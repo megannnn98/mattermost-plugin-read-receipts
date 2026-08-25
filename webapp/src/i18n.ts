@@ -6,10 +6,24 @@ const MESSAGES = {
     en: {
         read: 'Read',
         readAt: 'Read at {time}',
+        readBy: 'Read by',
+        readMore: 'and {count} more',
+        readMoreTruncated: 'and more than {count}',
+        readApprox: '≈ {time}',
+        readCount: '{count} readers',
+        readLoading: 'Loading…',
+        readError: 'Could not load the reader list',
     },
     ru: {
         read: 'Прочитано',
         readAt: 'Прочитано в {time}',
+        readBy: 'Прочитали',
+        readMore: 'и ещё {count}',
+        readMoreTruncated: 'и ещё более {count}',
+        readApprox: '≈ {time}',
+        readCount: 'Прочитали: {count}',
+        readLoading: 'Загрузка…',
+        readError: 'Не удалось загрузить список',
     },
 } as const;
 
