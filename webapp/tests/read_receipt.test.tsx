@@ -19,7 +19,7 @@ jest.mock('../src/client', () => ({
 }));
 
 jest.mock('../src/actions', () => ({
-    sendReadReceipt: jest.fn().mockResolvedValue(undefined),
+    sendReadReceipt: jest.fn().mockResolvedValue(true),
 }));
 
 jest.mock('../src/visibility', () => {
@@ -111,7 +111,7 @@ describe('ReadReceipt component', () => {
         act(() => jest.advanceTimersByTime(1500));
 
         expect(sendReadReceipt).toHaveBeenCalledTimes(1);
-        expect(sendReadReceipt).toHaveBeenCalledWith(expect.anything(), 'channel1', 'p1', 1000);
+        expect(sendReadReceipt).toHaveBeenCalledWith('channel1', 'p1', 1000);
     });
 
     it('does not report while the window is not focused', () => {
@@ -139,7 +139,7 @@ describe('ReadReceipt component', () => {
         act(() => jest.advanceTimersByTime(1500));
 
         expect(sendReadReceipt).toHaveBeenCalledTimes(1);
-        expect(sendReadReceipt).toHaveBeenCalledWith(expect.anything(), 'channel1', 'p1', 1000);
+        expect(sendReadReceipt).toHaveBeenCalledWith('channel1', 'p1', 1000);
     });
 
     it('does not double-report after focus regain', () => {

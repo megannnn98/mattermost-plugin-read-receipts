@@ -74,7 +74,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
                     return;
                 }
                 hasReportedRef.current = true;
-                sendReadReceipt(store, current.channelId, postId, current.createAt);
+                void sendReadReceipt(current.channelId, postId, current.createAt);
             }, DWELL_MS);
         };
 

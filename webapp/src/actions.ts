@@ -82,29 +82,21 @@ export async function loadChannelReceipts(
 }
 
 export async function sendReadReceipt(
-    store: PluginStore,
     channelId: string,
     postId: string,
     createAt: number,
-): Promise<void> {
+): Promise<boolean> {
     const dedup = getDeduplicator();
     if (!dedup.shouldSend(channelId, postId, createAt)) {
-        return;
+        return true;
     }
 
     try {
-        const response = await reportRead(postId);
+        await reportRead(postId);
         dedup.markSent(channelId, postId, createAt);
-        store.dispatch({
-            type: ACTION_TYPES.WS_RECEIPT,
-            data: {
-                channel_id: response.channel_id,
-                post_id: response.post_id,
-                create_at: response.create_at,
-                read_at: response.read_at,
-            },
-        });
+        return true;
     } catch (error) {
         console.error(`[${PLUGIN_ID}] Failed to send read receipt:`, error);
+        return false;
     }
 }

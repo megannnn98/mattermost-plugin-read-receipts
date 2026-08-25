@@ -13,6 +13,19 @@ export function handleWebSocketEvent(msg: WebSocketMessage, store: PluginStore):
         return;
     }
 
+    // The server addresses the event to the post's author and also includes
+    // author_id in the payload. A non-empty author_id that is not the current
+    // user is a cross-checking signal that this event is not meant for us — the
+    // addressed broadcast should already have filtered it, but this defends
+    // against a mis-addressed broadcast.
+    const {author_id: authorId} = msg.data;
+    if (authorId) {
+        const currentUserId = store.getState()?.entities?.users?.currentUserId;
+        if (authorId !== currentUserId) {
+            return;
+        }
+    }
+
     const {channel_id: channelId, post_id: postId} = msg.data;
     if (!channelId || !postId) {
         return;

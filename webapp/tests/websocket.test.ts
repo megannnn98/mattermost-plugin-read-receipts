@@ -2,10 +2,13 @@ import {ACTION_TYPES} from '../src/reducer';
 import {WS_EVENT, handleWebSocketEvent} from '../src/websocket';
 
 describe('handleWebSocketEvent', () => {
-    let store: {dispatch: jest.Mock};
+    let store: {dispatch: jest.Mock; getState: jest.Mock};
 
     beforeEach(() => {
-        store = {dispatch: jest.fn()};
+        store = {
+            dispatch: jest.fn(),
+            getState: jest.fn().mockReturnValue({entities: {users: {currentUserId: 'me'}}}),
+        };
     });
 
     it('dispatches the receipt of a matching event', () => {
@@ -36,6 +39,33 @@ describe('handleWebSocketEvent', () => {
             type: ACTION_TYPES.WS_RECEIPT,
             data: {channel_id: 'dm1', post_id: 'p1', create_at: 100, read_at: 200},
         });
+    });
+
+    it('dispatches when author_id matches the current user', () => {
+        handleWebSocketEvent(
+            {
+                event: WS_EVENT,
+                data: {channel_id: 'dm1', post_id: 'p1', create_at: 100, read_at: 200, author_id: 'me'},
+            },
+            store,
+        );
+
+        expect(store.dispatch).toHaveBeenCalledWith({
+            type: ACTION_TYPES.WS_RECEIPT,
+            data: {channel_id: 'dm1', post_id: 'p1', create_at: 100, read_at: 200},
+        });
+    });
+
+    it('ignores an event addressed to another author', () => {
+        handleWebSocketEvent(
+            {
+                event: WS_EVENT,
+                data: {channel_id: 'dm1', post_id: 'p1', create_at: 100, read_at: 200, author_id: 'someone-else'},
+            },
+            store,
+        );
+
+        expect(store.dispatch).not.toHaveBeenCalled();
     });
 
     it('ignores other events and malformed payloads', () => {
