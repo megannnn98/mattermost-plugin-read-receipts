@@ -102,7 +102,7 @@ func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Ch
 		}
 	}
 
-	written, err := p.setReceiptAtomic(post.Id, readerID, now, ttlSeconds)
+	written, err := p.setReceiptAtomic(channel.Id, post.Id, readerID, now, ttlSeconds)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +119,7 @@ func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Ch
 		// First write wins: a receipt already exists for this reader. Report
 		// the stored read time so a repeated request is fully idempotent
 		// (the watermark did not advance either, so no WS event is sent).
-		if stored, err := p.getReceipt(post.Id, readerID); err == nil && stored != nil {
+		if stored, err := p.getReceipt(channel.Id, post.Id, readerID); err == nil && stored != nil {
 			receipt.ReadAt = *stored
 		}
 	}
@@ -213,7 +213,7 @@ func (p *Plugin) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	receipts := make(map[string]int64)
 	for _, postID := range postIDs {
-		readAt, err := p.getReceipt(postID, otherUserID)
+		readAt, err := p.getReceipt(channel.Id, postID, otherUserID)
 		if err != nil {
 			continue
 		}

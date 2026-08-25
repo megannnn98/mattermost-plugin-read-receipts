@@ -26,9 +26,24 @@ func wmKey(channelID, readerID string) string {
 	return fmt.Sprintf("%s%s_%s", kvPrefixWM, channelID, readerID)
 }
 
-func rrKey(postID, readerID string) string {
-	return fmt.Sprintf("%s%s_%s", kvPrefixRR, postID, readerID)
+func rrKey(channelID, postID, readerID string) string {
+	return fmt.Sprintf("%s%s_%s_%s", kvPrefixRR, channelID, postID, readerID)
 }
+
+// Authorization invariant (see handleQuery):
+//   - The per-post receipt is keyed by the post's channel: `rr_<channelID>_<postID>_<readerID>`
+//     exists iff `readerID` read `postID` inside `channelID`. Reading one's own post is
+//     rejected (ErrAuthorSelfRead), a DM is always 1:1, and `readerID` is the second
+//     member, so the author of the post is always the requester. A requester who passes a
+//     post_id from a different channel can therefore never read someone else's receipt:
+//     the key prefix (validated channel.Id) simply won't match.
+//   - This is a structural guarantee that deliberately avoids an extra GetPost per post_id
+//     (up to 200 API calls per DM open would be an unacceptable regression).
+//
+// Migration: version 0.1.0 has no public installations, so backward compatibility is not
+// kept. Old `rr_<postID>_<readerID>` keys still exist with a TTL, but they are never read
+// under the new `rr_<channelID>_<postID>_<readerID>` scheme and expire on their own within
+// ReceiptRetentionDays. The `wm_*` key format is unchanged.
 
 func (p *Plugin) getWatermark(channelID, readerID string) (*Watermark, error) {
 	key := wmKey(channelID, readerID)
@@ -68,8 +83,8 @@ func (p *Plugin) setWatermark(channelID, readerID string, wm *Watermark) error {
 	return nil
 }
 
-func (p *Plugin) setReceiptAtomic(postID, readerID string, readAt int64, ttlSeconds int64) (bool, error) {
-	key := rrKey(postID, readerID)
+func (p *Plugin) setReceiptAtomic(channelID, postID, readerID string, readAt int64, ttlSeconds int64) (bool, error) {
+	key := rrKey(channelID, postID, readerID)
 	data, err := json.Marshal(readAt)
 	if err != nil {
 		return false, fmt.Errorf("marshal read_at: %w", err)
@@ -86,8 +101,8 @@ func (p *Plugin) setReceiptAtomic(postID, readerID string, readAt int64, ttlSeco
 	return ok, nil
 }
 
-func (p *Plugin) getReceipt(postID, readerID string) (*int64, error) {
-	key := rrKey(postID, readerID)
+func (p *Plugin) getReceipt(channelID, postID, readerID string) (*int64, error) {
+	key := rrKey(channelID, postID, readerID)
 	data, appErr := p.API.KVGet(key)
 	if appErr != nil {
 		return nil, fmt.Errorf("kv get receipt: %s", appErr.Error())

@@ -55,7 +55,7 @@ func TestHandleRead_Success(t *testing.T) {
 
 	api.On("KVGet", wmKey(channelID, userID)).Return(nil, nil)
 	api.On("KVSetWithOptions", wmKey(channelID, userID), mock.Anything, mock.Anything).Return(true, nil)
-	api.On("KVSetWithOptions", rrKey(postID, userID), mock.Anything, mock.Anything).Return(true, nil)
+	api.On("KVSetWithOptions", rrKey(channelID, postID, userID), mock.Anything, mock.Anything).Return(true, nil)
 
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
 
@@ -209,8 +209,8 @@ func TestHandleRead_RepeatReturnsStoredReadAt(t *testing.T) {
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
 
 	api.On("KVGet", wmKey(channelID, userID)).Return(wmData, nil)
-	api.On("KVSetWithOptions", rrKey(postID, userID), mock.Anything, mock.Anything).Return(false, nil)
-	api.On("KVGet", rrKey(postID, userID)).Return(rrData, nil)
+	api.On("KVSetWithOptions", rrKey(channelID, postID, userID), mock.Anything, mock.Anything).Return(false, nil)
+	api.On("KVGet", rrKey(channelID, postID, userID)).Return(rrData, nil)
 
 	body, _ := json.Marshal(readRequest{PostID: postID})
 	req := httptest.NewRequest("POST", "/api/v1/read", bytes.NewReader(body))

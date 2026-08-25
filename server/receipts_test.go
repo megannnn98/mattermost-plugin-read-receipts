@@ -34,7 +34,7 @@ func TestMarkAsRead_WatermarkCreated(t *testing.T) {
 
 	api.On("KVGet", wmKey(channelID, readerID)).Return(nil, nil)
 	api.On("KVSetWithOptions", wmKey(channelID, readerID), mock.Anything, mock.Anything).Return(true, nil)
-	api.On("KVSetWithOptions", rrKey(postID, readerID), mock.Anything, mock.Anything).Return(true, nil)
+	api.On("KVSetWithOptions", rrKey(channelID, postID, readerID), mock.Anything, mock.Anything).Return(true, nil)
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
 
 	receipt, err := p.markAsRead(readerID, post, channel)
@@ -73,7 +73,7 @@ func TestMarkAsRead_WatermarkMonotonicity(t *testing.T) {
 	}
 
 	api.On("KVGet", wmKey(channelID, readerID)).Return(wmData, nil)
-	api.On("KVSetWithOptions", rrKey(oldPostID, readerID), mock.Anything, mock.Anything).Return(true, nil)
+	api.On("KVSetWithOptions", rrKey(channelID, oldPostID, readerID), mock.Anything, mock.Anything).Return(true, nil)
 
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
 
@@ -120,9 +120,9 @@ func TestMarkAsRead_Idempotency(t *testing.T) {
 	}
 
 	api.On("KVGet", wmKey(channelID, readerID)).Return(wmData, nil)
-	api.On("KVSetWithOptions", rrKey(postID, readerID), mock.Anything, mock.Anything).Return(false, nil)
+	api.On("KVSetWithOptions", rrKey(channelID, postID, readerID), mock.Anything, mock.Anything).Return(false, nil)
 	rrData, _ := json.Marshal(existingWM.ReadAt)
-	api.On("KVGet", rrKey(postID, readerID)).Return(rrData, nil)
+	api.On("KVGet", rrKey(channelID, postID, readerID)).Return(rrData, nil)
 
 	receipt, err := p.markAsRead(readerID, post, channel)
 	require.NoError(t, err)
@@ -169,9 +169,9 @@ func TestHandleQuery_Success(t *testing.T) {
 
 	readAt1 := int64(4000)
 	readAtData1, _ := json.Marshal(readAt1)
-	api.On("KVGet", rrKey(postID1, otherUserID)).Return(readAtData1, nil)
+	api.On("KVGet", rrKey(channelID, postID1, otherUserID)).Return(readAtData1, nil)
 
-	api.On("KVGet", rrKey(postID2, otherUserID)).Return(nil, nil)
+	api.On("KVGet", rrKey(channelID, postID2, otherUserID)).Return(nil, nil)
 
 	body, _ := json.Marshal(queryRequest{
 		ChannelID: channelID,
