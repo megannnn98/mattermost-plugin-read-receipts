@@ -8,12 +8,11 @@ import (
 )
 
 var (
-	ErrNotDMChannel    = errors.New("channel is not a DM")
-	ErrNotMember       = errors.New("user is not a member of the channel")
-	ErrAuthorSelfRead  = errors.New("author cannot mark own post as read")
-	ErrPostNotFound    = errors.New("post not found")
-	ErrChannelNotFound = errors.New("channel not found")
-	ErrSelfDM          = errors.New("direct channel has no other member")
+	ErrChannelTypeDisabled = errors.New("read receipts are disabled for this channel type")
+	ErrNotMember           = errors.New("user is not a member of the channel")
+	ErrAuthorSelfRead      = errors.New("author cannot mark own post as read")
+	ErrPostNotFound        = errors.New("post not found")
+	ErrChannelNotFound     = errors.New("channel not found")
 )
 
 func (p *Plugin) validateReadRequest(userID, postID string) (*model.Post, *model.Channel, error) {
@@ -27,8 +26,8 @@ func (p *Plugin) validateReadRequest(userID, postID string) (*model.Post, *model
 		return nil, nil, fmt.Errorf("%w: %s", ErrChannelNotFound, appErr.Error())
 	}
 
-	if channel.Type != model.ChannelTypeDirect {
-		return nil, nil, ErrNotDMChannel
+	if !p.getConfiguration().channelTypeEnabled(string(channel.Type)) {
+		return nil, nil, ErrChannelTypeDisabled
 	}
 
 	if !p.API.HasPermissionToChannel(userID, channel.Id, model.PermissionReadChannel) {
@@ -48,8 +47,8 @@ func (p *Plugin) validateQueryRequest(userID, channelID string) (*model.Channel,
 		return nil, fmt.Errorf("%w: %s", ErrChannelNotFound, appErr.Error())
 	}
 
-	if channel.Type != model.ChannelTypeDirect {
-		return nil, ErrNotDMChannel
+	if !p.getConfiguration().channelTypeEnabled(string(channel.Type)) {
+		return nil, ErrChannelTypeDisabled
 	}
 
 	if !p.API.HasPermissionToChannel(userID, channelID, model.PermissionReadChannel) {
@@ -57,27 +56,4 @@ func (p *Plugin) validateQueryRequest(userID, channelID string) (*model.Channel,
 	}
 
 	return channel, nil
-}
-
-// getOtherDMMember returns the other participant of a 1:1 DM. Mattermost also
-// creates a self-DM (the "personal notes" channel, name `<id>__<id>`) which is
-// type D but has a single member; that case is reported as ErrSelfDM so callers
-// can answer with an empty result instead of failing.
-func (p *Plugin) getOtherDMMember(channel *model.Channel, userID string) (string, error) {
-	members, appErr := p.API.GetChannelMembers(channel.Id, 0, 2)
-	if appErr != nil {
-		return "", fmt.Errorf("get channel members: %s", appErr.Error())
-	}
-
-	for _, m := range members {
-		if m.UserId != userID {
-			return m.UserId, nil
-		}
-	}
-
-	if len(members) > 0 {
-		return "", ErrSelfDM
-	}
-
-	return "", fmt.Errorf("other member not found in DM")
 }

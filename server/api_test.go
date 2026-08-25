@@ -26,6 +26,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, *plugintest.API) {
 	p.configuration = &configuration{
 		EnableDebugLogging:   false,
 		ReceiptRetentionDays: 30,
+		EnabledChannelTypes:  defaultChannelTypes,
 	}
 	p.configMu.Unlock()
 	return p, api
@@ -52,6 +53,8 @@ func TestHandleRead_Success(t *testing.T) {
 	api.On("GetPost", postID).Return(post, nil)
 	api.On("GetChannel", channelID).Return(channel, nil)
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
+	api.On("KVGet", idxKey(channelID)).Return(nil, nil)
+	api.On("KVSetWithOptions", idxKey(channelID), mock.Anything, mock.Anything).Return(true, nil)
 
 	api.On("KVGet", wmKey(channelID, userID)).Return(nil, nil)
 	api.On("KVSetWithOptions", wmKey(channelID, userID), mock.Anything, mock.Anything).Return(true, nil)
@@ -108,6 +111,8 @@ func TestHandleRead_AuthorSelfRead(t *testing.T) {
 	api.On("GetPost", postID).Return(post, nil)
 	api.On("GetChannel", channelID).Return(channel, nil)
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
+	indexData, _ := json.Marshal([]string{userID})
+	api.On("KVGet", idxKey(channelID)).Return(indexData, nil)
 
 	body, _ := json.Marshal(readRequest{PostID: postID})
 	req := httptest.NewRequest("POST", "/api/v1/read", bytes.NewReader(body))
@@ -121,6 +126,7 @@ func TestHandleRead_AuthorSelfRead(t *testing.T) {
 
 func TestHandleRead_NonDMChannel(t *testing.T) {
 	p, api := setupTestPlugin(t)
+	p.configuration.EnabledChannelTypes = "D"
 
 	userID := "user1xabcdefghijklmnopqrst"
 	postID := "post1xabcdefghijklmnopqrst"
@@ -208,6 +214,8 @@ func TestHandleRead_RepeatReturnsStoredReadAt(t *testing.T) {
 	api.On("GetChannel", channelID).Return(channel, nil)
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
 
+	indexData, _ := json.Marshal([]string{userID})
+	api.On("KVGet", idxKey(channelID)).Return(indexData, nil)
 	api.On("KVGet", wmKey(channelID, userID)).Return(wmData, nil)
 	api.On("KVSetWithOptions", rrKey(channelID, postID, userID), mock.Anything, mock.Anything).Return(false, nil)
 	api.On("KVGet", rrKey(channelID, postID, userID)).Return(rrData, nil)

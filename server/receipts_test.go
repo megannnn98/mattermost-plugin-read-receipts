@@ -31,6 +31,8 @@ func TestMarkAsRead_WatermarkCreated(t *testing.T) {
 		Id:   channelID,
 		Type: model.ChannelTypeDirect,
 	}
+	api.On("KVGet", idxKey(channelID)).Return(nil, nil)
+	api.On("KVSetWithOptions", idxKey(channelID), mock.Anything, mock.Anything).Return(true, nil)
 
 	api.On("KVGet", wmKey(channelID, readerID)).Return(nil, nil)
 	api.On("KVSetWithOptions", wmKey(channelID, readerID), mock.Anything, mock.Anything).Return(true, nil)
@@ -71,6 +73,8 @@ func TestMarkAsRead_WatermarkMonotonicity(t *testing.T) {
 		Id:   channelID,
 		Type: model.ChannelTypeDirect,
 	}
+	indexData, _ := json.Marshal([]string{readerID})
+	api.On("KVGet", idxKey(channelID)).Return(indexData, nil)
 
 	api.On("KVGet", wmKey(channelID, readerID)).Return(wmData, nil)
 	// The watermark already covers this post, so markAsRead reads the stored
@@ -120,6 +124,8 @@ func TestMarkAsRead_Idempotency(t *testing.T) {
 		Id:   channelID,
 		Type: model.ChannelTypeDirect,
 	}
+	indexData, _ := json.Marshal([]string{readerID})
+	api.On("KVGet", idxKey(channelID)).Return(indexData, nil)
 
 	api.On("KVGet", wmKey(channelID, readerID)).Return(wmData, nil)
 	api.On("KVSetWithOptions", rrKey(channelID, postID, readerID), mock.Anything, mock.Anything).Return(false, nil)
@@ -156,10 +162,8 @@ func TestHandleQuery_Success(t *testing.T) {
 
 	api.On("GetChannel", channelID).Return(channel, nil)
 	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
-	api.On("GetChannelMembers", channelID, 0, 2).Return(model.ChannelMembers{
-		{UserId: userID},
-		{UserId: otherUserID},
-	}, nil)
+	indexData, _ := json.Marshal([]string{otherUserID})
+	api.On("KVGet", idxKey(channelID)).Return(indexData, nil)
 
 	wm := &Watermark{
 		PostID:   postID2,
@@ -191,18 +195,20 @@ func TestHandleQuery_Success(t *testing.T) {
 	err := json.NewDecoder(w.Body).Decode(&resp)
 	require.NoError(t, err)
 
-	require.NotNil(t, resp.Watermark)
-	assert.Equal(t, postID2, resp.Watermark.PostID)
-	assert.Equal(t, int64(2000), resp.Watermark.CreateAt)
+	require.Len(t, resp.Watermarks, 1)
+	assert.Equal(t, otherUserID, resp.Watermarks[0].ReaderID)
+	assert.Equal(t, postID2, resp.Watermarks[0].PostID)
+	assert.Equal(t, int64(2000), resp.Watermarks[0].CreateAt)
 
 	require.NotNil(t, resp.Receipts)
-	assert.Equal(t, readAt1, resp.Receipts[postID1])
+	assert.Equal(t, readAt1, resp.Receipts[postID1][otherUserID])
 	_, hasPost2 := resp.Receipts[postID2]
 	assert.False(t, hasPost2, "post2 should not have explicit receipt (covered by watermark)")
 }
 
 func TestHandleQuery_NonDM(t *testing.T) {
 	p, api := setupTestPlugin(t)
+	p.configuration.EnabledChannelTypes = "D"
 
 	userID := "user1xabcdefghijklmnopqrst"
 	channelID := "channel1xabcdefghijklmnopq"
