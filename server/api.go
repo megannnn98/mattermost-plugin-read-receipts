@@ -85,11 +85,6 @@ func (p *Plugin) handleRead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Channel) (*Receipt, error) {
-	indexedNow, err := p.ensureReaderIndexed(channel.Id, readerID)
-	if err != nil {
-		return nil, err
-	}
-
 	config := p.getConfiguration()
 	ttlSeconds := config.retentionSeconds()
 	now := p.now()
@@ -101,6 +96,13 @@ func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Ch
 	// Without this a reader who simply scrolls past old messages after a restart
 	// would move "Read 14:02" to today's time for a month-old message.
 	wm, _, err := p.getWatermarkRaw(channel.Id, readerID)
+	if err != nil {
+		return nil, err
+	}
+	// Never make a reader visible to aggregate queries until their watermark was
+	// read successfully. Otherwise a transient KV error could mutate idx_ with no
+	// way to determine or publish the resulting legacy coverage.
+	indexedNow, err := p.ensureReaderIndexed(channel.Id, readerID)
 	if err != nil {
 		return nil, err
 	}

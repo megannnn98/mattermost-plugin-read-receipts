@@ -440,6 +440,70 @@ func TestMarkAsRead_LegacyIndexInvalidatesWhenNewerReceiptWriteFails(t *testing.
 	api.AssertNotCalled(t, "PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything)
 }
 
+func TestMarkAsRead_WatermarkReadFailureDoesNotMutateReaderIndex(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	api.On("PublishWebSocketEvent", mock.Anything, mock.Anything, mock.Anything).Return()
+
+	channelID := validID("chanWatermarkReadFail")
+	readerID := validID("readerWatermarkReadFail")
+	post := &model.Post{Id: validID("postWatermarkReadFail"), UserId: validID("authorWatermarkReadFail"), ChannelId: channelID, CreateAt: 1000}
+	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
+	legacy := Watermark{PostID: validID("legacyWatermarkReadFail"), CreateAt: 5000, ReadAt: 6000}
+	kv.set(wmKey(channelID, readerID), mustJSON(t, legacy))
+	kv.failGet = func(key string) *model.AppError {
+		if key == wmKey(channelID, readerID) {
+			return model.NewAppError("kv", "watermark unavailable", nil, "", http.StatusInternalServerError)
+		}
+		return nil
+	}
+
+	_, err := p.markAsRead(readerID, post, channel)
+	require.Error(t, err)
+	assert.Nil(t, kv.get(idxKey(channelID)), "failed watermark reads must not expose a reader through idx_")
+	assert.Equal(t, mustJSON(t, legacy), kv.get(wmKey(channelID, readerID)))
+	api.AssertNotCalled(t, "PublishWebSocketEvent", mock.Anything, mock.Anything, mock.Anything)
+}
+
+func TestMarkAsRead_RetryAfterWatermarkReadFailureIndexesAndInvalidates(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	api.On("PublishWebSocketEvent", mock.Anything, mock.Anything, mock.Anything).Return()
+
+	channelID := validID("chanWatermarkRetry")
+	readerID := validID("readerWatermarkRetry")
+	post := &model.Post{Id: validID("postWatermarkRetry"), UserId: validID("authorWatermarkRetry"), ChannelId: channelID, CreateAt: 1000}
+	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
+	kv.set(wmKey(channelID, readerID), mustJSON(t, Watermark{PostID: validID("legacyWatermarkRetry"), CreateAt: 5000, ReadAt: 6000}))
+	failWatermarkRead := true
+	kv.failGet = func(key string) *model.AppError {
+		if failWatermarkRead && key == wmKey(channelID, readerID) {
+			return model.NewAppError("kv", "watermark unavailable", nil, "", http.StatusInternalServerError)
+		}
+		return nil
+	}
+
+	_, err := p.markAsRead(readerID, post, channel)
+	require.Error(t, err)
+	assert.Nil(t, kv.get(idxKey(channelID)))
+
+	failWatermarkRead = false
+	_, err = p.markAsRead(readerID, post, channel)
+	require.NoError(t, err)
+	assert.Equal(t, []string{readerID}, readIndex(t, kv, channelID))
+
+	invalidations := 0
+	for _, call := range api.Calls {
+		if call.Method == "PublishWebSocketEvent" && call.Arguments.Get(0) == wsEventReceiptsChanged {
+			invalidations++
+		}
+	}
+	assert.Equal(t, 1, invalidations)
+	api.AssertNotCalled(t, "PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything)
+}
+
 func TestWatermarkAdvanceEventuallyRefreshesOlderPostsOfOtherAuthors(t *testing.T) {
 	kv := newFakeKV()
 	p, api := setupTestPlugin(t)
