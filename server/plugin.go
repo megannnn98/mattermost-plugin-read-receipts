@@ -13,6 +13,7 @@ const (
 	wsEventReceipt = "read_receipt"
 	kvPrefixWM     = "wm_"
 	kvPrefixRR     = "rr_"
+	kvPrefixIDX    = "idx_"
 	maxQueryIDs    = 200
 )
 

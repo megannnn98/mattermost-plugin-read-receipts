@@ -45,7 +45,73 @@ func rrKey(channelID, postID, readerID string) string {
 // under the new `rr_<channelID>_<postID>_<readerID>` scheme and expire on their own within
 // ReceiptRetentionDays. The `wm_*` key format is unchanged.
 
-const maxWatermarkCASRetries = 5
+const (
+	maxWatermarkCASRetries = 5
+	// The index CAS loop needs a far larger bound than the watermark one. A
+	// watermark loser usually exits immediately on the re-read ("already covered"),
+	// so contention resolves itself; every first-time reader of a channel, by
+	// contrast, *must* land an append, so the number of retries a writer needs
+	// scales with the number of concurrent first readers, not with a constant.
+	// At 5 retries a burst of readers entering a busy channel silently lost
+	// entries — and a lost entry means that reader's receipts stay invisible
+	// until they happen to read again.
+	maxIndexCASRetries = 64
+	maxIndexReaders    = 1000
+	maxQueryReaders    = 200
+)
+
+func idxKey(channelID string) string {
+	return fmt.Sprintf("%s%s", kvPrefixIDX, channelID)
+}
+
+func (p *Plugin) getReaderIndex(channelID string) ([]string, []byte, error) {
+	data, appErr := p.API.KVGet(idxKey(channelID))
+	if appErr != nil {
+		return nil, nil, fmt.Errorf("kv get reader index: %s", appErr.Error())
+	}
+	if data == nil {
+		return nil, nil, nil
+	}
+	var readers []string
+	if err := json.Unmarshal(data, &readers); err != nil {
+		return nil, data, fmt.Errorf("unmarshal reader index: %w", err)
+	}
+	return readers, data, nil
+}
+
+func (p *Plugin) ensureReaderIndexed(channelID, readerID string) error {
+	key := idxKey(channelID)
+	for attempt := 0; attempt < maxIndexCASRetries; attempt++ {
+		readers, raw, err := p.getReaderIndex(channelID)
+		if err != nil {
+			return err
+		}
+		for _, existing := range readers {
+			if existing == readerID {
+				return nil
+			}
+		}
+		if len(readers) >= maxIndexReaders {
+			p.logWarn("reader index is full", "channel_id", channelID, "max_readers", maxIndexReaders)
+			return nil
+		}
+		data, err := json.Marshal(append(readers, readerID))
+		if err != nil {
+			return fmt.Errorf("marshal reader index: %w", err)
+		}
+		ok, appErr := p.API.KVSetWithOptions(key, data, model.PluginKVSetOptions{Atomic: true, OldValue: raw})
+		if appErr != nil {
+			return fmt.Errorf("kv set reader index: %s", appErr.Error())
+		}
+		if ok {
+			return nil
+		}
+	}
+	// Exhaustion is reported, never swallowed: the caller turns it into a 500 and
+	// the client's backoff retries once the burst is over. Silently giving up
+	// would drop the reader from every future count.
+	return fmt.Errorf("reader index CAS failed after %d attempts", maxIndexCASRetries)
+}
 
 // getWatermarkRaw returns the parsed watermark AND the raw bytes that were read
 // from KV. The raw bytes are what OldValue for the CAS write must be — not the
