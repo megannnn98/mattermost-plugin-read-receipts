@@ -355,3 +355,60 @@ func TestMarkAsRead_FirstWriteWins(t *testing.T) {
 	}
 	assert.Equal(t, 1, wsCalls, "only the first read publishes a WS event")
 }
+
+// --- The watermark is the authority on "already read" ------------------------
+
+// A post the watermark already covers must keep its original read time even
+// when its per-post receipt has expired by TTL. Otherwise a reader who merely
+// scrolls past old messages after a Desktop restart would move the author's
+// "Read HH:MM" indicator to today's time, and would emit a spurious WS event.
+func TestMarkAsRead_ExpiredReceiptKeepsWatermarkTime(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
+
+	readerID := validID("userR")
+	channelID := validID("chanTTL")
+	postID := validID("postTTL")
+	oldPost := &model.Post{Id: postID, UserId: validID("author"), ChannelId: channelID, CreateAt: 1000}
+	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
+
+	// Everything up to create_at 5000 was read long ago, at 7777. The per-post
+	// receipt for the old post is gone (TTL), only the watermark remains.
+	kv.set(wmKey(channelID, readerID), mustJSON(t, Watermark{PostID: validID("newer"), CreateAt: 5000, ReadAt: 7777}))
+	require.Nil(t, kv.get(rrKey(channelID, postID, readerID)))
+
+	receipt, err := p.markAsRead(readerID, oldPost, channel)
+	require.NoError(t, err)
+	assert.Equal(t, int64(7777), receipt.ReadAt, "an already-read post must keep the watermark read time")
+
+	assert.Nil(t, kv.get(rrKey(channelID, postID, readerID)), "no receipt may be written for an already-read post")
+	api.AssertNotCalled(t, "PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything)
+
+	var wm Watermark
+	require.NoError(t, json.Unmarshal(kv.get(wmKey(channelID, readerID)), &wm))
+	assert.Equal(t, int64(5000), wm.CreateAt, "the watermark must not move backwards")
+	assert.Equal(t, int64(7777), wm.ReadAt)
+}
+
+// The exact time still wins over the watermark approximation while the per-post
+// receipt is alive.
+func TestMarkAsRead_CoveredPostPrefersStoredReceipt(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+
+	readerID := validID("userR")
+	channelID := validID("chanEX")
+	postID := validID("postEX")
+	oldPost := &model.Post{Id: postID, UserId: validID("author"), ChannelId: channelID, CreateAt: 1000}
+	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
+
+	kv.set(wmKey(channelID, readerID), mustJSON(t, Watermark{PostID: validID("newer"), CreateAt: 5000, ReadAt: 7777}))
+	kv.set(rrKey(channelID, postID, readerID), mustJSON(t, int64(4242)))
+
+	receipt, err := p.markAsRead(readerID, oldPost, channel)
+	require.NoError(t, err)
+	assert.Equal(t, int64(4242), receipt.ReadAt, "the stored per-post receipt is the exact time")
+}

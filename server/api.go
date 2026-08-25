@@ -85,6 +85,32 @@ func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Ch
 	ttlSeconds := config.retentionSeconds()
 	now := nowMillis()
 
+	// 0. The watermark is the authority on "already read": it covers every post
+	// up to its create_at and never expires. A post it covers was read earlier,
+	// even when the per-post receipt has since expired by TTL, so it must not be
+	// re-stamped with a fresh time and must not be re-announced to the author.
+	// Without this a reader who simply scrolls past old messages after a restart
+	// would move "Read 14:02" to today's time for a month-old message.
+	wm, _, err := p.getWatermarkRaw(channel.Id, readerID)
+	if err != nil {
+		return nil, err
+	}
+	if wm != nil && post.CreateAt <= wm.CreateAt {
+		// Exact time from the per-post receipt when it is still there, the
+		// watermark's read time as the documented approximation otherwise.
+		readAt := wm.ReadAt
+		if stored, err := p.getReceipt(channel.Id, post.Id, readerID); err == nil && stored != nil {
+			readAt = *stored
+		}
+		return &Receipt{
+			PostID:    post.Id,
+			ChannelID: channel.Id,
+			CreateAt:  post.CreateAt,
+			ReadAt:    readAt,
+			ReaderID:  readerID,
+		}, nil
+	}
+
 	// 1. Persist the per-post receipt FIRST. If this write fails the watermark is
 	// untouched, so the endpoint can report an error honestly (the reader has not
 	// committed a read yet and a retry will just do the same work again).

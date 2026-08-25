@@ -73,7 +73,9 @@ func TestMarkAsRead_WatermarkMonotonicity(t *testing.T) {
 	}
 
 	api.On("KVGet", wmKey(channelID, readerID)).Return(wmData, nil)
-	api.On("KVSetWithOptions", rrKey(channelID, oldPostID, readerID), mock.Anything, mock.Anything).Return(true, nil)
+	// The watermark already covers this post, so markAsRead reads the stored
+	// per-post receipt (absent here) instead of writing anything.
+	api.On("KVGet", rrKey(channelID, oldPostID, readerID)).Return(nil, nil)
 
 	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
 
