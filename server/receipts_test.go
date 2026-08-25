@@ -17,13 +17,13 @@ import (
 func TestMarkAsRead_WatermarkCreated(t *testing.T) {
 	p, api := setupTestPlugin(t)
 
-	readerID := "reader1"
-	channelID := "channel1"
-	postID := "post1"
+	readerID := "reader1xabcdefghijklmnopqr"
+	channelID := "channel1xabcdefghijklmnopq"
+	postID := "post1xabcdefghijklmnopqrst"
 
 	post := &model.Post{
 		Id:        postID,
-		UserId:    "author1",
+		UserId:    "author1xabcdefghijklmnopqr",
 		ChannelId: channelID,
 		CreateAt:  1000,
 	}
@@ -49,10 +49,10 @@ func TestMarkAsRead_WatermarkCreated(t *testing.T) {
 func TestMarkAsRead_WatermarkMonotonicity(t *testing.T) {
 	p, api := setupTestPlugin(t)
 
-	readerID := "reader1"
-	channelID := "channel1"
-	oldPostID := "post_old"
-	newPostID := "post_new"
+	readerID := "reader1xabcdefghijklmnopqr"
+	channelID := "channel1xabcdefghijklmnopq"
+	oldPostID := "postoldxabcdefghijklmnopqr"
+	newPostID := "postnewxabcdefghijklmnopqr"
 
 	existingWM := &Watermark{
 		PostID:   newPostID,
@@ -63,7 +63,7 @@ func TestMarkAsRead_WatermarkMonotonicity(t *testing.T) {
 
 	oldPost := &model.Post{
 		Id:        oldPostID,
-		UserId:    "author1",
+		UserId:    "author1xabcdefghijklmnopqr",
 		ChannelId: channelID,
 		CreateAt:  1000,
 	}
@@ -97,9 +97,9 @@ func TestMarkAsRead_WatermarkMonotonicity(t *testing.T) {
 func TestMarkAsRead_Idempotency(t *testing.T) {
 	p, api := setupTestPlugin(t)
 
-	readerID := "reader1"
-	channelID := "channel1"
-	postID := "post1"
+	readerID := "reader1xabcdefghijklmnopqr"
+	channelID := "channel1xabcdefghijklmnopq"
+	postID := "post1xabcdefghijklmnopqrst"
 
 	existingWM := &Watermark{
 		PostID:   postID,
@@ -110,7 +110,7 @@ func TestMarkAsRead_Idempotency(t *testing.T) {
 
 	post := &model.Post{
 		Id:        postID,
-		UserId:    "author1",
+		UserId:    "author1xabcdefghijklmnopqr",
 		ChannelId: channelID,
 		CreateAt:  1000,
 	}
@@ -141,11 +141,11 @@ func TestMarkAsRead_Idempotency(t *testing.T) {
 func TestHandleQuery_Success(t *testing.T) {
 	p, api := setupTestPlugin(t)
 
-	userID := "user1"
-	otherUserID := "user2"
-	channelID := "channel1"
-	postID1 := "post1"
-	postID2 := "post2"
+	userID := "user1xabcdefghijklmnopqrst"
+	otherUserID := "user2xabcdefghijklmnopqrst"
+	channelID := "channel1xabcdefghijklmnopq"
+	postID1 := "post1xabcdefghijklmnopqrst"
+	postID2 := "post2xabcdefghijklmnopqrst"
 
 	channel := &model.Channel{
 		Id:   channelID,
@@ -202,8 +202,8 @@ func TestHandleQuery_Success(t *testing.T) {
 func TestHandleQuery_NonDM(t *testing.T) {
 	p, api := setupTestPlugin(t)
 
-	userID := "user1"
-	channelID := "channel1"
+	userID := "user1xabcdefghijklmnopqrst"
+	channelID := "channel1xabcdefghijklmnopq"
 
 	channel := &model.Channel{
 		Id:   channelID,
@@ -214,7 +214,7 @@ func TestHandleQuery_NonDM(t *testing.T) {
 
 	body, _ := json.Marshal(queryRequest{
 		ChannelID: channelID,
-		PostIDs:   []string{"post1"},
+		PostIDs:   []string{"post1xabcdefghijklmnopqrst"},
 	})
 	req := httptest.NewRequest("POST", "/api/v1/receipts/query", bytes.NewReader(body))
 	req.Header.Set("Mattermost-User-Id", userID)

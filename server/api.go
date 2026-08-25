@@ -30,6 +30,8 @@ type readResponse struct {
 }
 
 func (p *Plugin) handleRead(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
 	userID := r.Header.Get("Mattermost-User-Id")
 	if userID == "" {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -42,7 +44,7 @@ func (p *Plugin) handleRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.PostID == "" {
+	if !model.IsValidId(req.PostID) {
 		http.Error(w, "post_id required", http.StatusBadRequest)
 		return
 	}
@@ -63,7 +65,7 @@ func (p *Plugin) handleRead(w http.ResponseWriter, r *http.Request) {
 
 	receipt, err := p.markAsRead(userID, post, channel)
 	if err != nil {
-		p.client.Log.Warn("mark as read failed", "error", err.Error())
+		p.logWarn("mark as read failed", "error", err.Error())
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -154,10 +156,11 @@ type watermarkResponse struct {
 type queryResponse struct {
 	Watermark *watermarkResponse `json:"watermark"`
 	Receipts  map[string]int64   `json:"receipts"`
-	Debug     bool               `json:"debug"`
 }
 
 func (p *Plugin) handleQuery(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
 	userID := r.Header.Get("Mattermost-User-Id")
 	if userID == "" {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -195,6 +198,9 @@ func (p *Plugin) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Query is intentionally bounded: the client sends at most maxQueryIDs own
+	// post ids, and only valid ids are looked up. This keeps a single DM open at
+	// 200 KV reads worst-case — no additional GetPost calls per id.
 	postIDs := req.PostIDs
 	if len(postIDs) > maxQueryIDs {
 		postIDs = postIDs[:maxQueryIDs]
@@ -208,6 +214,9 @@ func (p *Plugin) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	receipts := make(map[string]int64)
 	for _, postID := range postIDs {
+		if !model.IsValidId(postID) {
+			continue
+		}
 		readAt, err := p.getReceipt(channel.Id, postID, otherUserID)
 		if err != nil {
 			continue
@@ -226,11 +235,9 @@ func (p *Plugin) handleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	config := p.getConfiguration()
 	resp := queryResponse{
 		Watermark: wmResp,
 		Receipts:  receipts,
-		Debug:     config.EnableDebugLogging,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

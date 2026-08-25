@@ -34,13 +34,13 @@ func setupTestPlugin(t *testing.T) (*Plugin, *plugintest.API) {
 func TestHandleRead_Success(t *testing.T) {
 	p, api := setupTestPlugin(t)
 
-	userID := "user1"
-	postID := "post1"
-	channelID := "channel1"
+	userID := "user1xabcdefghijklmnopqrst"
+	postID := "post1xabcdefghijklmnopqrst"
+	channelID := "channel1xabcdefghijklmnopq"
 
 	post := &model.Post{
 		Id:        postID,
-		UserId:    "user2",
+		UserId:    "user2xabcdefghijklmnopqrst",
 		ChannelId: channelID,
 		CreateAt:  1000,
 	}
@@ -79,7 +79,7 @@ func TestHandleRead_Success(t *testing.T) {
 func TestHandleRead_Unauthorized(t *testing.T) {
 	p, _ := setupTestPlugin(t)
 
-	body, _ := json.Marshal(readRequest{PostID: "post1"})
+	body, _ := json.Marshal(readRequest{PostID: "post1xabcdefghijklmnopqrst"})
 	req := httptest.NewRequest("POST", "/api/v1/read", bytes.NewReader(body))
 
 	w := httptest.NewRecorder()
@@ -91,9 +91,9 @@ func TestHandleRead_Unauthorized(t *testing.T) {
 func TestHandleRead_AuthorSelfRead(t *testing.T) {
 	p, api := setupTestPlugin(t)
 
-	userID := "user1"
-	postID := "post1"
-	channelID := "channel1"
+	userID := "user1xabcdefghijklmnopqrst"
+	postID := "post1xabcdefghijklmnopqrst"
+	channelID := "channel1xabcdefghijklmnopq"
 
 	post := &model.Post{
 		Id:        postID,
@@ -122,13 +122,13 @@ func TestHandleRead_AuthorSelfRead(t *testing.T) {
 func TestHandleRead_NonDMChannel(t *testing.T) {
 	p, api := setupTestPlugin(t)
 
-	userID := "user1"
-	postID := "post1"
-	channelID := "channel1"
+	userID := "user1xabcdefghijklmnopqrst"
+	postID := "post1xabcdefghijklmnopqrst"
+	channelID := "channel1xabcdefghijklmnopq"
 
 	post := &model.Post{
 		Id:        postID,
-		UserId:    "user2",
+		UserId:    "user2xabcdefghijklmnopqrst",
 		ChannelId: channelID,
 	}
 	channel := &model.Channel{
@@ -152,13 +152,13 @@ func TestHandleRead_NonDMChannel(t *testing.T) {
 func TestHandleRead_NotMember(t *testing.T) {
 	p, api := setupTestPlugin(t)
 
-	userID := "user1"
-	postID := "post1"
-	channelID := "channel1"
+	userID := "user1xabcdefghijklmnopqrst"
+	postID := "post1xabcdefghijklmnopqrst"
+	channelID := "channel1xabcdefghijklmnopq"
 
 	post := &model.Post{
 		Id:        postID,
-		UserId:    "user2",
+		UserId:    "user2xabcdefghijklmnopqrst",
 		ChannelId: channelID,
 	}
 	channel := &model.Channel{
@@ -183,14 +183,14 @@ func TestHandleRead_NotMember(t *testing.T) {
 func TestHandleRead_RepeatReturnsStoredReadAt(t *testing.T) {
 	p, api := setupTestPlugin(t)
 
-	userID := "user1"
-	postID := "post1"
-	channelID := "channel1"
+	userID := "user1xabcdefghijklmnopqrst"
+	postID := "post1xabcdefghijklmnopqrst"
+	channelID := "channel1xabcdefghijklmnopq"
 	storedReadAt := int64(123456789)
 
 	post := &model.Post{
 		Id:        postID,
-		UserId:    "user2",
+		UserId:    "user2xabcdefghijklmnopqrst",
 		ChannelId: channelID,
 		CreateAt:  1000,
 	}
