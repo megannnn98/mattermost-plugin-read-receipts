@@ -12,6 +12,7 @@ import {
     isSufficientlyVisible,
     resolveObservedElement,
     VISIBILITY_THRESHOLD,
+    VISIBILITY_THRESHOLDS,
 } from '../visibility_ratio';
 
 const DWELL_MS = 1000;
@@ -68,6 +69,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
     const locale = usePluginSelector<SupportedLocale>(store, (state) => getLocaleFromState(state));
 
     useEffect(() => {
+        let disposed = false;
         if (!store) {
             return;
         }
@@ -115,6 +117,9 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
 
             statusRef.current = 'pending';
             sendReadReceipt(current.channelId, postId, current.createAt).then((ok) => {
+                if (disposed) {
+                    return;
+                }
                 if (ok) {
                     statusRef.current = 'sent';
                     return;
@@ -158,7 +163,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
                     startDwell();
                 }
             }
-        }, {threshold: [0, VISIBILITY_THRESHOLD]});
+        }, {threshold: VISIBILITY_THRESHOLDS});
 
         if (sentinelRef.current) {
             observer.observe(resolveObservedElement(sentinelRef.current));
@@ -185,10 +190,12 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         const unsubTracker = tracker.subscribe(onVisibilityChange);
 
         return () => {
+            disposed = true;
             observer.disconnect();
             unsubTracker();
             clearDwell();
             clearRetry();
+            lastSufficientlyVisibleRef.current = false;
         };
         // `isDM` is a dependency on purpose: while the channel entity is not in
         // the store yet the component renders nothing, so there is no sentinel

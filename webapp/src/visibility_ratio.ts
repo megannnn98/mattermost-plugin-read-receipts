@@ -2,6 +2,17 @@
 // count as read. Kept dependency-free so they are directly unit-testable.
 
 export const VISIBILITY_THRESHOLD = 0.75;
+export const VISIBILITY_THRESHOLDS = [
+    0,
+    0.001,
+    0.002,
+    0.003,
+    0.004,
+    0.005,
+    0.006,
+    0.0075,
+    ...Array.from({length: 100}, (_, index) => (index + 1) / 100),
+];
 
 export interface RectLike {
     height: number;
