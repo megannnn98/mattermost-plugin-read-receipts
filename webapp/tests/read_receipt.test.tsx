@@ -10,12 +10,7 @@ import {sendReadReceipt} from '../src/actions';
 jest.mock('../src/client', () => ({
     PLUGIN_ID: 'com.integrasources.read-receipts',
     fetchChannelReceipts: jest.fn(),
-    reportRead: jest.fn().mockResolvedValue({
-        post_id: 'p1',
-        channel_id: 'channel1',
-        create_at: 1000,
-        read_at: 2000,
-    }),
+    reportRead: jest.fn(),
 }));
 
 jest.mock('../src/actions', () => ({
@@ -42,16 +37,38 @@ jest.mock('../src/visibility', () => {
     };
 });
 
-type IOEntry = {isIntersecting: boolean};
+type IOEntry = {
+    isIntersecting: boolean;
+    intersectionRatio: number;
+    intersectionRect: {height: number; width: number};
+    rootBounds: {height: number; width: number};
+};
 
 class MockIntersectionObserver {
     static callback: ((entries: IOEntry[]) => void) | null = null;
     constructor(callback: (entries: IOEntry[]) => void) {
         MockIntersectionObserver.callback = callback;
     }
-    observe() {}
+    observe(_el: Element) {}
     disconnect() {}
     unobserve() {}
+}
+
+function entryFor(visible: boolean): IOEntry {
+    // A visible post: 100% of its area in a 1000px viewport.
+    return visible
+        ? {
+            isIntersecting: true,
+            intersectionRatio: 1,
+            intersectionRect: {height: 100, width: 500},
+            rootBounds: {height: 1000, width: 1920},
+        }
+        : {
+            isIntersecting: false,
+            intersectionRatio: 0,
+            intersectionRect: {height: 0, width: 0},
+            rootBounds: {height: 1000, width: 1920},
+        };
 }
 
 function makeState() {
@@ -80,9 +97,14 @@ function makeStore() {
     };
 }
 
-function fireIntersecting(entry: boolean) {
-    MockIntersectionObserver.callback?.([{isIntersecting: entry}]);
+function fireIntersecting(visible: boolean) {
+    MockIntersectionObserver.callback?.([entryFor(visible)]);
 }
+
+const flushMicrotasks = () => act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+});
 
 describe('ReadReceipt component', () => {
     let container: HTMLDivElement;
@@ -93,6 +115,7 @@ describe('ReadReceipt component', () => {
         (window as any).IntersectionObserver = MockIntersectionObserver;
         MockIntersectionObserver.callback = null;
         (sendReadReceipt as jest.Mock).mockClear();
+        (sendReadReceipt as jest.Mock).mockResolvedValue(true);
         setStore(makeStore());
         container = document.createElement('div');
         root = createRoot(container);
@@ -155,5 +178,82 @@ describe('ReadReceipt component', () => {
         fireIntersecting(true);
         act(() => jest.advanceTimersByTime(1500));
         expect(sendReadReceipt).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not report a post that is below the visibility threshold', () => {
+        const below = {isIntersecting: true, intersectionRatio: 0.5, intersectionRect: {height: 50, width: 500}, rootBounds: {height: 1000, width: 1920}};
+        act(() => root.render(<ReadReceipt postId="p1"/>));
+
+        MockIntersectionObserver.callback?.([below]);
+        act(() => jest.advanceTimersByTime(1500));
+
+        expect(sendReadReceipt).not.toHaveBeenCalled();
+    });
+
+    it('reports via the tall-post fallback when its visible slice fills the viewport', () => {
+        // A post taller than the viewport: low ratio (0.1) but its in-view slice
+        // (height 900) exceeds 75% of the 1000px viewport height.
+        const tall = {isIntersecting: true, intersectionRatio: 0.1, intersectionRect: {height: 900, width: 500}, rootBounds: {height: 1000, width: 1920}};
+        act(() => root.render(<ReadReceipt postId="p1"/>));
+
+        MockIntersectionObserver.callback?.([tall]);
+        act(() => jest.advanceTimersByTime(1500));
+
+        expect(sendReadReceipt).toHaveBeenCalledTimes(1);
+    });
+
+    it('cancels the send when the post leaves the viewport during the dwell', () => {
+        act(() => root.render(<ReadReceipt postId="p1"/>));
+
+        fireIntersecting(true);
+        act(() => jest.advanceTimersByTime(500));
+        fireIntersecting(false);
+        act(() => jest.advanceTimersByTime(1500));
+
+        expect(sendReadReceipt).not.toHaveBeenCalled();
+    });
+
+    it('retries after a failed request, then never sends again once it succeeds', async () => {
+        const mSend = sendReadReceipt as jest.Mock;
+        // The real sendReadReceipt returns false on failure (it never rejects),
+        // so model a failure as an explicit false result.
+        mSend
+            .mockResolvedValueOnce(false)  // first attempt fails
+            .mockResolvedValueOnce(true);                      // retry succeeds
+
+        act(() => root.render(<ReadReceipt postId="p1"/>));
+
+        // First attempt: failure during the initial dwell.
+        fireIntersecting(true);
+        act(() => jest.advanceTimersByTime(1500));
+        await flushMicrotasks();
+        expect(mSend).toHaveBeenCalledTimes(1);
+
+        // After the backoff the request is retried and succeeds.
+        act(() => jest.advanceTimersByTime(5000));
+        await flushMicrotasks();
+        expect(mSend).toHaveBeenCalledTimes(2);
+
+        // The post stays visible: no further sends.
+        fireIntersecting(true);
+        act(() => jest.advanceTimersByTime(1500));
+        expect(mSend).toHaveBeenCalledTimes(2);
+    });
+
+    it('aborts a scheduled retry when the window blurs during the backoff', async () => {
+        const mSend = sendReadReceipt as jest.Mock;
+        mSend.mockResolvedValueOnce(false);
+
+        act(() => root.render(<ReadReceipt postId="p1"/>));
+
+        fireIntersecting(true);
+        act(() => jest.advanceTimersByTime(1500));
+        await flushMicrotasks();
+        expect(mSend).toHaveBeenCalledTimes(1);
+
+        // Blur during the retry backoff cancels the pending retry.
+        act(() => (getVisibilityTracker() as any)._set({isFocused: false}));
+        act(() => jest.advanceTimersByTime(6000));
+        expect(mSend).toHaveBeenCalledTimes(1);
     });
 });

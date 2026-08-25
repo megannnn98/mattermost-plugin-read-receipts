@@ -2,13 +2,20 @@ import React, {useEffect, useRef, useState} from 'react';
 
 import {sendReadReceipt} from '../actions';
 import {getStore} from '../store_ref';
-import {getVisibilityTracker} from '../visibility';
+import {getVisibilityTracker, VisibilityState} from '../visibility';
 import {isPostRead, selectPostReadAt} from '../selectors';
 import {getPostContext, shouldReportRead} from '../gating';
 import {formatReadTime, getLocaleFromState, t} from '../i18n';
+import {
+    isSufficientlyVisible,
+    resolveObservedElement,
+    VISIBILITY_THRESHOLD,
+} from '../visibility_ratio';
 
 const DWELL_MS = 1000;
-const VISIBILITY_THRESHOLD = 0.75;
+const RETRY_BACKOFF_MS = 5000;
+
+type SendStatus = 'idle' | 'pending' | 'sent';
 
 interface ReadReceiptProps {
     postId: string;
@@ -17,8 +24,9 @@ interface ReadReceiptProps {
 export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
     const sentinelRef = useRef<HTMLSpanElement>(null);
     const dwellTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const lastIntersectingRef = useRef(false);
-    const hasReportedRef = useRef(false);
+    const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const lastSufficientlyVisibleRef = useRef(false);
+    const statusRef = useRef<SendStatus>('idle');
     const [, forceUpdate] = useState(0);
 
     const store = getStore();
@@ -53,66 +61,107 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
             }
         };
 
+        const clearRetry = () => {
+            if (retryTimerRef.current) {
+                clearTimeout(retryTimerRef.current);
+                retryTimerRef.current = null;
+            }
+        };
+
+        const canReport = () => statusRef.current !== 'sent' && statusRef.current !== 'pending';
+
+        const attemptSend = () => {
+            if (!canReport()) {
+                return;
+            }
+            if (!tracker.isActive()) {
+                return;
+            }
+            const state = store.getState();
+            if (!shouldReportRead(state, postId)) {
+                return;
+            }
+            const current = getPostContext(state, postId);
+            if (!current) {
+                return;
+            }
+
+            statusRef.current = 'pending';
+            sendReadReceipt(current.channelId, postId, current.createAt).then((ok) => {
+                if (ok) {
+                    statusRef.current = 'sent';
+                    return;
+                }
+                // The request failed — go back to idle so a later attempt can
+                // retry, and schedule one automatically after a backoff.
+                statusRef.current = 'idle';
+                retryTimerRef.current = setTimeout(() => {
+                    retryTimerRef.current = null;
+                    if (canReport() && lastSufficientlyVisibleRef.current && tracker.isActive()) {
+                        attemptSend();
+                    }
+                }, RETRY_BACKOFF_MS);
+            });
+        };
+
         const startDwell = () => {
-            if (hasReportedRef.current || dwellTimerRef.current) {
+            if (!canReport() || dwellTimerRef.current) {
                 return;
             }
             dwellTimerRef.current = setTimeout(() => {
                 dwellTimerRef.current = null;
-
-                // Re-checked on fire: the channel may have been switched
-                // away, or the window blurred, while the timer was pending.
-                if (hasReportedRef.current || !tracker.isActive()) {
-                    return;
-                }
-                const state = store.getState();
-                if (!shouldReportRead(state, postId)) {
-                    return;
-                }
-                const current = getPostContext(state, postId);
-                if (!current) {
-                    return;
-                }
-                hasReportedRef.current = true;
-                void sendReadReceipt(current.channelId, postId, current.createAt);
+                attemptSend();
             }, DWELL_MS);
         };
 
-        const observer = new IntersectionObserver(
-            (entries) => {
-                for (const entry of entries) {
-                    lastIntersectingRef.current = entry.isIntersecting;
-                    if (!entry.isIntersecting || !tracker.isActive()) {
-                        clearDwell();
-                        continue;
+        const observer = new IntersectionObserver((entries) => {
+            for (const entry of entries) {
+                const visible = isSufficientlyVisible(entry, VISIBILITY_THRESHOLD);
+                lastSufficientlyVisibleRef.current = visible;
+                if (!visible || !tracker.isActive() || statusRef.current === 'pending') {
+                    // Leaving view, an inactive window, or a request in flight
+                    // cancels any pending dwell/backoff (unless already sent).
+                    clearDwell();
+                    if (statusRef.current !== 'sent') {
+                        clearRetry();
                     }
+                    continue;
+                }
+                if (statusRef.current === 'idle') {
                     startDwell();
                 }
-            },
-            {threshold: VISIBILITY_THRESHOLD},
-        );
+            }
+        }, {threshold: [0, VISIBILITY_THRESHOLD]});
 
         if (sentinelRef.current) {
-            observer.observe(sentinelRef.current);
+            observer.observe(resolveObservedElement(sentinelRef.current));
         }
 
-        const unsubTracker = tracker.subscribe((visibility) => {
-            if (!visibility.isVisible || !visibility.isFocused || visibility.isIdle) {
+        const onVisibilityChange = (visibility: VisibilityState) => {
+            const active = visibility.isVisible && visibility.isFocused && !visibility.isIdle;
+            if (!active) {
+                // Blur/hidden/idle cancels any pending dwell or retry backoff.
                 clearDwell();
+                if (statusRef.current !== 'sent') {
+                    clearRetry();
+                }
                 return;
             }
             // The window became active again (focus/visibility/idle). No new
             // IntersectionObserver callback fires for a post that is already
-            // visible, so restart the dwell from the last known intersection.
-            if (lastIntersectingRef.current) {
+            // visible, so restart the dwell from the last known visibility.
+            if (lastSufficientlyVisibleRef.current && statusRef.current === 'idle') {
                 startDwell();
             }
-        });
+        };
+
+        const unsubTracker = tracker.subscribe(onVisibilityChange);
 
         return () => {
             observer.disconnect();
             unsubTracker();
             clearDwell();
+            clearRetry();
         };
     }, [postId, store]);
 
