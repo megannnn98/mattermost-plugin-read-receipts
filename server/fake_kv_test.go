@@ -15,6 +15,7 @@ import (
 type fakeKV struct {
 	mu      sync.Mutex
 	m       map[string][]byte
+	failGet func(key string) *model.AppError
 	failSet func(key string) *model.AppError
 }
 
@@ -45,6 +46,11 @@ func (f *fakeKV) get(key string) []byte {
 // get is the KVGet backing function: returns a copy so the caller mutating the
 // returned bytes cannot race with the store, matching Mattermost's semantics.
 func (f *fakeKV) kvGet(key string) ([]byte, *model.AppError) {
+	if f.failGet != nil {
+		if appErr := f.failGet(key); appErr != nil {
+			return nil, appErr
+		}
+	}
 	return f.get(key), nil
 }
 
@@ -84,7 +90,10 @@ func wireKV(api *plugintest.API, kv *fakeKV) {
 			data, _ := kv.kvGet(key)
 			return data
 		},
-		func(key string) *model.AppError { return nil },
+		func(key string) *model.AppError {
+			_, appErr := kv.kvGet(key)
+			return appErr
+		},
 	)
 	api.On("KVSetWithOptions", mock.Anything, mock.Anything, mock.Anything).Return(
 		func(key string, value []byte, options model.PluginKVSetOptions) bool {

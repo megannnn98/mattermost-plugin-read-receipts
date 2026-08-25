@@ -132,6 +132,93 @@ func TestAdvanceWatermark_MonotonicUnderConcurrency(t *testing.T) {
 
 // --- Partial KV failures ----------------------------------------------------
 
+func TestHandleQuery_ReceiptReadFailureReturns500WithoutPartialResponse(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+
+	userID := validID("userQuery")
+	otherID := validID("otherQuery")
+	channelID := validID("channelQuery")
+	firstPostID := validID("firstPost")
+	failingPostID := validID("failingPost")
+	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
+	api.On("GetChannel", channelID).Return(channel, nil)
+	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
+	api.On("GetChannelMembers", channelID, 0, 2).Return(model.ChannelMembers{
+		{UserId: userID},
+		{UserId: otherID},
+	}, nil)
+
+	kv.set(rrKey(channelID, firstPostID, otherID), mustJSON(t, int64(1000)))
+	kv.failGet = func(key string) *model.AppError {
+		if key == rrKey(channelID, failingPostID, otherID) {
+			return model.NewAppError("kv", "receipt read failed", nil, "", http.StatusInternalServerError)
+		}
+		return nil
+	}
+
+	w := doQuery(p, mustJSON(t, queryRequest{
+		ChannelID: channelID,
+		PostIDs:   []string{firstPostID, failingPostID},
+	}), userID)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.NotContains(t, w.Body.String(), firstPostID, "a failed query must not serialize receipts read before the error")
+}
+
+func TestHandleQuery_WatermarkReadFailureReturns500(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+
+	userID := validID("userWatermark")
+	otherID := validID("otherWatermark")
+	channelID := validID("channelWatermark")
+	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
+	api.On("GetChannel", channelID).Return(channel, nil)
+	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
+	api.On("GetChannelMembers", channelID, 0, 2).Return(model.ChannelMembers{
+		{UserId: userID},
+		{UserId: otherID},
+	}, nil)
+
+	kv.failGet = func(key string) *model.AppError {
+		if key == wmKey(channelID, otherID) {
+			return model.NewAppError("kv", "watermark read failed", nil, "", http.StatusInternalServerError)
+		}
+		return nil
+	}
+
+	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID}), userID)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestHandleQuery_MissingReceiptReturns200(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+
+	userID := validID("userMissing")
+	otherID := validID("otherMissing")
+	channelID := validID("channelMissing")
+	postID := validID("missingPost")
+	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
+	api.On("GetChannel", channelID).Return(channel, nil)
+	api.On("HasPermissionToChannel", userID, channelID, model.PermissionReadChannel).Return(true)
+	api.On("GetChannelMembers", channelID, 0, 2).Return(model.ChannelMembers{
+		{UserId: userID},
+		{UserId: otherID},
+	}, nil)
+
+	w := doQuery(p, mustJSON(t, queryRequest{ChannelID: channelID, PostIDs: []string{postID}}), userID)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var response queryResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&response))
+	assert.Empty(t, response.Receipts)
+}
+
 func TestMarkAsRead_WatermarkKeepsFirstReceiptTimeAfterRetry(t *testing.T) {
 	kv := newFakeKV()
 	p, api := setupTestPlugin(t)

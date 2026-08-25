@@ -251,7 +251,12 @@ func (p *Plugin) handleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 		readAt, err := p.getReceipt(channel.Id, postID, otherUserID)
 		if err != nil {
-			continue
+			// Never answer 200 with a partial receipt set: the client marks the
+			// channel handled on success, so a swallowed error would silently drop
+			// receipts until a reconnect. Failing lets the watcher's backoff retry.
+			p.logWarn("receipt read failed", "channel_id", channel.Id, "post_id", postID, "error", err.Error())
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
 		}
 		if readAt != nil {
 			receipts[postID] = *readAt
