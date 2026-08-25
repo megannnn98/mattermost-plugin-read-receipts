@@ -3,6 +3,10 @@ dist/
 server/dist/
 webapp/dist/
 
+# Server binaries (built into server/dist/ and the final bundle only)
+server/mattermost-plugin-read-receipts
+server/plugin-*
+
 # Node modules
 webapp/node_modules/
 
