@@ -1,56 +1,60 @@
-import {GlobalState, PluginState, Watermark} from './types';
+import {GlobalState, PluginConfig, PluginState, PostStatus, ReaderList} from './types';
 import {PLUGIN_ID} from './client';
 
+const EMPTY_STATUS: PostStatus = {count: 0, truncated: false, read_at: null};
+
 const emptyPluginState: PluginState = {
-    watermarks: {},
-    receipts: {},
+    statuses: {},
     readers: {},
     profiles: {},
+    profilesRevision: 0,
+    config: null,
 };
 
 export function selectPluginState(state: GlobalState): PluginState {
     return (state[`plugins-${PLUGIN_ID}`] as PluginState | undefined) ?? emptyPluginState;
 }
 
-export function selectChannelWatermark(state: GlobalState, channelId: string, readerId: string): Watermark | null {
-    const pluginState = selectPluginState(state);
-    return pluginState.watermarks[channelId]?.[readerId] ?? null;
+export function selectPostStatus(state: GlobalState, postId: string): PostStatus {
+    return selectPluginState(state).statuses[postId] ?? EMPTY_STATUS;
 }
 
-export function selectPostReceipt(state: GlobalState, postId: string, readerId: string): number | null {
-    const pluginState = selectPluginState(state);
-    return pluginState.receipts[postId]?.[readerId] ?? null;
+export function selectPostReaders(state: GlobalState, postId: string): ReaderList | undefined {
+    return selectPluginState(state).readers[postId];
 }
 
-export function selectPostReadCount(state: GlobalState, postId: string, postCreateAt: number, channelId: string, authorId?: string): number {
-    const pluginState = selectPluginState(state);
-    const currentUserId = state.entities?.users?.currentUserId;
-    const watermarks = pluginState.watermarks[channelId];
-    const receipts = pluginState.receipts[postId];
-    if (!watermarks && !receipts) {
-        return 0;
-    }
-    const readerIds = new Set([...Object.keys(watermarks ?? {}), ...Object.keys(receipts ?? {})]);
-    return [...readerIds].filter((readerId) => readerId !== currentUserId && readerId !== authorId && (receipts?.[readerId] !== undefined || (watermarks?.[readerId]?.create_at ?? -1) >= postCreateAt)).length;
+export function selectProfilesRevision(state: GlobalState): number {
+    return selectPluginState(state).profilesRevision;
 }
 
-// A DM has exactly one other reader. Group callers must use the count selector
-// instead; picking an arbitrary object key there would be misleading.
-export function selectSingleReaderReadAt(state: GlobalState, postId: string, postCreateAt: number, channelId: string): number | null {
-    const pluginState = selectPluginState(state);
-    const readerId = Object.keys(pluginState.watermarks[channelId] ?? {}).find((id) => id !== state.entities?.users?.currentUserId) ?? Object.keys(pluginState.receipts[postId] ?? {})[0];
-    if (!readerId) {
-        return null;
-    }
-    const receipt = selectPostReceipt(state, postId, readerId);
-    if (receipt !== null) {
-        return receipt;
-    }
+export function selectPluginConfig(state: GlobalState): PluginConfig | null {
+    return selectPluginState(state).config;
+}
 
-    const watermark = selectChannelWatermark(state, channelId, readerId);
-    if (watermark && postCreateAt <= watermark.create_at) {
-        return watermark.read_at;
-    }
+/**
+ * The channel types the server is collecting receipts for.
+ *
+ * Returns null until the configuration has been fetched. Callers must treat that
+ * as "not yet known" and stay inert rather than guessing: assuming a type is
+ * enabled would report reads the server is about to refuse, and assuming it is
+ * disabled would flash an indicator off and on again.
+ */
+export function selectEnabledChannelTypes(state: GlobalState): string | null {
+    return selectPluginConfig(state)?.enabled_channel_types ?? null;
+}
 
-    return null;
+export function isChannelTypeEnabled(state: GlobalState, channelType: string | undefined): boolean {
+    const enabled = selectEnabledChannelTypes(state);
+    if (!enabled || !channelType) {
+        return false;
+    }
+    return enabled.includes(channelType);
+}
+
+/**
+ * A profile for the reader list: the plugin's own copy first, the webapp's own
+ * store as a fallback, so a user the webapp already knows costs no request.
+ */
+export function selectReaderProfile(state: GlobalState, userId: string) {
+    return selectPluginState(state).profiles[userId] ?? state.entities?.users?.profiles?.[userId];
 }

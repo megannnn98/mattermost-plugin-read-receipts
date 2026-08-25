@@ -1,13 +1,14 @@
 import {PLUGIN_ID} from './client';
-import {PluginAction, PluginState, ReaderRead, Watermark} from './types';
+import {MMUserProfile, PluginAction, PluginConfig, PluginState, ReaderRead} from './types';
 
-export type {PluginState, Watermark} from './types';
+export type {PluginState, PostStatus} from './types';
 
 const initialState: PluginState = {
-    watermarks: {},
-    receipts: {},
+    statuses: {},
     readers: {},
     profiles: {},
+    profilesRevision: 0,
+    config: null,
 };
 
 export const ACTION_TYPES = {
@@ -15,16 +16,29 @@ export const ACTION_TYPES = {
     WS_RECEIPT: `${PLUGIN_ID}_WS_RECEIPT`,
     POST_READERS: `${PLUGIN_ID}_POST_READERS`,
     PROFILES: `${PLUGIN_ID}_PROFILES`,
+    CONFIG: `${PLUGIN_ID}_CONFIG`,
 };
 
-type QueryActionData = {channelId: string; watermarks?: Watermark[]; receipts?: Record<string, Record<string, number>>};
+type QueryActionData = {
+    channelId: string;
+    posts?: Record<string, {count: number; truncated: boolean; read_at?: number}>;
+    truncated?: boolean;
+};
 
 type WSReceiptActionData = {
     channel_id: string;
     post_id: string;
-    create_at: number;
     read_at: number;
     reader_id: string;
+    isDM: boolean;
+};
+
+type ReadersActionData = {
+    postId: string;
+    readers: ReaderRead[];
+    truncated: boolean;
+    nextOffset: number;
+    append: boolean;
 };
 
 export function reducer(
@@ -33,56 +47,68 @@ export function reducer(
 ): PluginState {
     switch (action.type) {
         case ACTION_TYPES.RECEIPTS_QUERY: {
-            const {channelId, watermarks = [], receipts = {}} = (action.data ?? {}) as QueryActionData;
-            const newWatermarks = {...state.watermarks};
-            const channelWatermarks = {...(newWatermarks[channelId] ?? {})};
-            for (const watermark of watermarks) {
-                const existing = channelWatermarks[watermark.reader_id];
-                if (!existing || watermark.create_at > existing.create_at) {
-                    channelWatermarks[watermark.reader_id] = watermark;
-                }
+            const {posts = {}, truncated = false} = (action.data ?? {}) as QueryActionData;
+            const statuses = {...state.statuses};
+            for (const [postId, status] of Object.entries(posts)) {
+                statuses[postId] = {
+                    count: status.count,
+                    truncated: status.truncated || truncated,
+                    read_at: status.read_at ?? null,
+                };
             }
-            newWatermarks[channelId] = channelWatermarks;
-            const mergedReceipts = {...state.receipts};
-            for (const [postId, byReader] of Object.entries(receipts)) {
-                mergedReceipts[postId] = {...(mergedReceipts[postId] ?? {}), ...byReader};
-            }
-            return {
-                ...state,
-                watermarks: newWatermarks,
-                receipts: mergedReceipts,
-            };
+            return {...state, statuses};
         }
 
         case ACTION_TYPES.WS_RECEIPT: {
-            const {channel_id, post_id, create_at, read_at, reader_id} = (action.data ?? {}) as WSReceiptActionData;
-            const newWatermarks = {...state.watermarks};
-            const channelWatermarks = {...(newWatermarks[channel_id] ?? {})};
-            const existing = channelWatermarks[reader_id];
-            if (!existing || create_at > existing.create_at) {
-                channelWatermarks[reader_id] = {
-                    reader_id,
-                    post_id,
-                    create_at,
-                    read_at,
-                };
+            const {post_id, read_at, isDM} = (action.data ?? {}) as WSReceiptActionData;
+            if (!post_id) {
+                return state;
             }
-            newWatermarks[channel_id] = channelWatermarks;
+            const existing = state.statuses[post_id];
+            // A websocket receipt proves at least one person has read the post; it
+            // does not say how many, because the count belongs to the server. In a
+            // DM there is only ever one reader, so the event is the whole truth
+            // there; elsewhere this is a floor that the next query replaces. Never
+            // a decrement — a stale event must not walk the count backwards.
+            const count = Math.max(existing?.count ?? 0, 1);
+            const readAt = isDM ? read_at : (existing?.read_at ?? null);
             return {
                 ...state,
-                watermarks: newWatermarks,
-                receipts: {...state.receipts, [post_id]: {...(state.receipts[post_id] ?? {}), [reader_id]: read_at}},
+                statuses: {
+                    ...state.statuses,
+                    [post_id]: {count, truncated: existing?.truncated ?? false, read_at: readAt},
+                },
             };
         }
 
         case ACTION_TYPES.POST_READERS: {
-            const data = (action.data ?? {}) as {postId: string; readers: ReaderRead[]; truncated: boolean};
-            return {...state, readers: {...state.readers, [data.postId]: {list: data.readers, truncated: data.truncated}}};
+            const data = (action.data ?? {}) as ReadersActionData;
+            const previous = data.append ? state.readers[data.postId]?.list ?? [] : [];
+            return {
+                ...state,
+                readers: {
+                    ...state.readers,
+                    [data.postId]: {
+                        list: [...previous, ...data.readers],
+                        truncated: data.truncated,
+                        nextOffset: data.nextOffset,
+                    },
+                },
+            };
         }
 
         case ACTION_TYPES.PROFILES: {
-            const data = (action.data ?? {}) as {profiles: PluginState['profiles']};
-            return {...state, profiles: {...state.profiles, ...data.profiles}};
+            const data = (action.data ?? {}) as {profiles: Record<string, MMUserProfile>};
+            return {
+                ...state,
+                profiles: {...state.profiles, ...data.profiles},
+                profilesRevision: state.profilesRevision + 1,
+            };
+        }
+
+        case ACTION_TYPES.CONFIG: {
+            const data = (action.data ?? {}) as {config: PluginConfig};
+            return {...state, config: data.config};
         }
 
         default:

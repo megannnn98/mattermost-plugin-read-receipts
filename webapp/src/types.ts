@@ -5,18 +5,18 @@
 
 // --- Redux state shapes -----------------------------------------------------
 
-export interface Watermark {
-    reader_id: string;
-    post_id: string;
-    create_at: number;
-    read_at: number;
-}
-
-export interface PluginState {
-    watermarks: Record<string, Record<string, Watermark>>;
-    receipts: Record<string, Record<string, number>>;
-    readers: Record<string, {list: ReaderRead[]; truncated: boolean}>;
-    profiles: Record<string, MMUserProfile>;
+/**
+ * Everything the sender is allowed to know about one of their own posts.
+ *
+ * `count` is how many people have read it and `truncated` says that number is a
+ * lower bound because the channel has more readers than one query covers. There
+ * are deliberately no reader identities here: the server does not send them, and
+ * the detailed list is fetched separately and only for the author.
+ */
+export interface PostStatus {
+    count: number;
+    truncated: boolean;
+    read_at: number | null;
 }
 
 export interface ReaderRead {
@@ -25,10 +25,32 @@ export interface ReaderRead {
     exact: boolean;
 }
 
+export interface ReaderList {
+    list: ReaderRead[];
+    truncated: boolean;
+    nextOffset: number;
+}
+
+export interface PluginConfig {
+    enabled_channel_types: string;
+}
+
+export interface PluginState {
+    statuses: Record<string, PostStatus>;
+    readers: Record<string, ReaderList>;
+    profiles: Record<string, MMUserProfile>;
+    // Bumped whenever `profiles` changes. Components select this instead of the
+    // profile map so that a profile arriving after a popover is already open
+    // re-renders it, without anything subscribing to the whole store.
+    profilesRevision: number;
+    config: PluginConfig | null;
+}
+
 export interface MMPost {
     id: string;
     user_id: string;
     channel_id: string;
+    root_id?: string;
     create_at: number;
     update_at?: number;
     edit_at?: number;
@@ -43,6 +65,7 @@ export interface MMChannel {
 }
 
 export interface MMUserProfile {
+    id?: string;
     username?: string;
     first_name?: string;
     last_name?: string;

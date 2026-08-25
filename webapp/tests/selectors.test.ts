@@ -1,57 +1,66 @@
-import {selectPostReadCount, selectSingleReaderReadAt} from '../src/selectors';
+import {
+    isChannelTypeEnabled,
+    selectEnabledChannelTypes,
+    selectPostReaders,
+    selectPostStatus,
+    selectProfilesRevision,
+    selectReaderProfile,
+} from '../src/selectors';
+import {makeGlobalState} from './helpers';
 
 describe('selectors', () => {
-    const makeState = (overrides: any = {}) => ({
-        'plugins-com.integrasources.read-receipts': {
-            watermarks: {},
-            receipts: {},
-            readers: {},
-            profiles: {},
-            ...overrides,
-        },
-        entities: {
-            users: {currentUserId: 'me'},
-        },
+    it('reports an empty status for a post nothing is known about', () => {
+        const state = makeGlobalState();
+        expect(selectPostStatus(state, 'p1')).toEqual({count: 0, truncated: false, read_at: null});
     });
 
-    it('returns zero when no reader covers the post', () => {
-        const state = makeState();
-        expect(selectPostReadCount(state, 'p1', 1000, 'ch1', 'author')).toBe(0);
-    });
-
-    it('counts only readers other than author and current user', () => {
-        const state = makeState({receipts: {p1: {reader: 2000, author: 2000, me: 2000}}});
-        expect(selectPostReadCount(state, 'p1', 1000, 'ch1', 'author')).toBe(1);
-    });
-
-    it('counts a reader whose watermark covers the post', () => {
-        const state = makeState({
-            watermarks: {ch1: {reader: {reader_id: 'reader', post_id: 'p2', create_at: 1500, read_at: 3000}}},
+    it('returns the stored status of a post', () => {
+        const state = makeGlobalState({
+            plugin: {statuses: {p1: {count: 3, truncated: true, read_at: 4000}}},
         });
-        expect(selectPostReadCount(state, 'p1', 1000, 'ch1', 'author')).toBe(1);
+        expect(selectPostStatus(state, 'p1')).toEqual({count: 3, truncated: true, read_at: 4000});
     });
 
-    it('does not count a reader whose watermark is older than the post', () => {
-        const state = makeState({
-            watermarks: {ch1: {reader: {reader_id: 'reader', post_id: 'p1', create_at: 1500, read_at: 3000}}},
+    it('returns the cached reader list of a post', () => {
+        const list = {list: [{user_id: 'a', read_at: 1, exact: true}], truncated: false, nextOffset: 0};
+        const state = makeGlobalState({plugin: {readers: {p1: list}}});
+        expect(selectPostReaders(state, 'p1')).toBe(list);
+        expect(selectPostReaders(state, 'p2')).toBeUndefined();
+    });
+
+    it('exposes the profile revision so a late profile can trigger a render', () => {
+        expect(selectProfilesRevision(makeGlobalState({plugin: {profilesRevision: 7}}))).toBe(7);
+    });
+
+    it('prefers the plugin profile and falls back to the webapp store', () => {
+        const state = makeGlobalState({
+            profiles: {webapp: {username: 'fromWebapp'}, both: {username: 'webappCopy'}},
+            plugin: {profiles: {plugin: {username: 'fromPlugin'}, both: {username: 'pluginCopy'}}},
         });
-        expect(selectPostReadCount(state, 'p2', 2000, 'ch1', 'author')).toBe(0);
+        expect(selectReaderProfile(state, 'plugin')?.username).toBe('fromPlugin');
+        expect(selectReaderProfile(state, 'webapp')?.username).toBe('fromWebapp');
+        expect(selectReaderProfile(state, 'both')?.username).toBe('pluginCopy');
+        expect(selectReaderProfile(state, 'nobody')).toBeUndefined();
     });
 
-    it('selectSingleReaderReadAt returns exact time from the DM reader', () => {
-        const state = makeState({receipts: {p1: {reader: 2000}}});
-        expect(selectSingleReaderReadAt(state, 'p1', 1000, 'ch1')).toBe(2000);
-    });
-
-    it('selectSingleReaderReadAt returns watermark time when covered', () => {
-        const state = makeState({
-            watermarks: {ch1: {reader: {reader_id: 'reader', post_id: 'p2', create_at: 1500, read_at: 3000}}},
+    describe('enabled channel types', () => {
+        it('is unknown until the configuration has been fetched', () => {
+            const state = makeGlobalState({plugin: {config: null}});
+            expect(selectEnabledChannelTypes(state)).toBeNull();
+            // Unknown must not read as enabled: the plugin has to stay inert
+            // rather than report reads the server is about to refuse.
+            for (const type of ['D', 'G', 'P', 'O']) {
+                expect(isChannelTypeEnabled(state, type)).toBe(false);
+            }
         });
-        expect(selectSingleReaderReadAt(state, 'p1', 1000, 'ch1')).toBe(3000);
-    });
 
-    it('selectSingleReaderReadAt returns null when not read', () => {
-        const state = makeState();
-        expect(selectSingleReaderReadAt(state, 'p1', 1000, 'ch1')).toBeNull();
+        it('follows the server configuration exactly', () => {
+            const state = makeGlobalState({plugin: {config: {enabled_channel_types: 'DG'}}});
+            expect(isChannelTypeEnabled(state, 'D')).toBe(true);
+            expect(isChannelTypeEnabled(state, 'G')).toBe(true);
+            expect(isChannelTypeEnabled(state, 'P')).toBe(false);
+            expect(isChannelTypeEnabled(state, 'O')).toBe(false);
+            expect(isChannelTypeEnabled(state, undefined)).toBe(false);
+        });
     });
 });
