@@ -84,11 +84,9 @@ func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Ch
 	ttlSeconds := config.retentionSeconds()
 	now := nowMillis()
 
-	wmAdvanced, err := p.advanceWatermark(channel.Id, readerID, post, now)
-	if err != nil {
-		return nil, err
-	}
-
+	// 1. Persist the per-post receipt FIRST. If this write fails the watermark is
+	// untouched, so the endpoint can report an error honestly (the reader has not
+	// committed a read yet and a retry will just do the same work again).
 	written, err := p.setReceiptAtomic(channel.Id, post.Id, readerID, now, ttlSeconds)
 	if err != nil {
 		return nil, err
@@ -103,15 +101,24 @@ func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Ch
 	}
 
 	if !written {
-		// First write wins: a receipt already exists for this reader. Report
-		// the stored read time so a repeated request is fully idempotent
-		// (the watermark did not advance either, so no WS event is sent).
+		// First write wins: a receipt already exists for this reader. Report the
+		// stored read time so a repeated request is fully idempotent.
 		if stored, err := p.getReceipt(channel.Id, post.Id, readerID); err == nil && stored != nil {
 			receipt.ReadAt = *stored
 		}
 	}
 
-	if wmAdvanced || written {
+	// 2. Raise the watermark. On failure the state stays conservative (receipt is
+	// written, watermark lags) and no WS event is published — a repeated request
+	// fixes it.
+	advanced, err := p.advanceWatermark(channel.Id, readerID, post, now)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Publish the WS event only after BOTH writes succeeded and at least one of
+	// them changed something, so a repeated POST does not emit spurious events.
+	if written || advanced {
 		p.publishReceiptWS(receipt, post.UserId)
 	}
 
@@ -127,6 +134,7 @@ func (p *Plugin) publishReceiptWS(receipt *Receipt, authorID string) {
 		"create_at":  receipt.CreateAt,
 		"read_at":    receipt.ReadAt,
 		"reader_id":  receipt.ReaderID,
+		"author_id":  authorID,
 	}, &model.WebsocketBroadcast{
 		UserId: authorID,
 	})
