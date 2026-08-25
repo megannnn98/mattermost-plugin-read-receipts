@@ -40,13 +40,14 @@ class NoopIntersectionObserver {
 const PLUGIN_BRANCH = 'plugins-com.integrasources.read-receipts';
 
 type Branch = {
-    watermarks: Record<string, Record<string, unknown>>;
-    receipts: Record<string, Record<string, number>>;
-    readers: Record<string, {list: Array<{user_id: string; read_at: number; exact: boolean}>; truncated: boolean}>;
+    statuses: Record<string, {count: number; truncated: boolean; read_at: number | null}>;
+    readers: Record<string, {list: Array<{user_id: string; read_at: number; exact: boolean}>; truncated: boolean; nextOffset: number}>;
     profiles: Record<string, unknown>;
+    profilesRevision: number;
+    config: {enabled_channel_types: string} | null;
 };
 
-function makeStore(channelType: string, branch: Partial<Branch> = {}, postAuthor = 'me') {
+function makeStore(channelType: string, branch: Partial<Branch> = {}, postAuthor = 'me', enabled = 'DGPO') {
     let state: any = {
         entities: {
             users: {currentUserId: 'me', profiles: {}},
@@ -58,9 +59,17 @@ function makeStore(channelType: string, branch: Partial<Branch> = {}, postAuthor
                 posts: {p1: {id: 'p1', user_id: postAuthor, channel_id: 'ch1', create_at: 2000}},
             },
         },
-        [PLUGIN_BRANCH]: {watermarks: {}, receipts: {}, readers: {}, profiles: {}, ...branch},
+        [PLUGIN_BRANCH]: {
+            statuses: {},
+            readers: {},
+            profiles: {},
+            profilesRevision: 0,
+            config: enabled === '' ? null : {enabled_channel_types: enabled},
+            ...branch,
+        },
     };
     const listeners = new Set<() => void>();
+    const notify = () => listeners.forEach((listener) => listener());
     return {
         getState: () => state,
         dispatch: jest.fn(),
@@ -68,21 +77,23 @@ function makeStore(channelType: string, branch: Partial<Branch> = {}, postAuthor
             listeners.add(listener);
             return () => listeners.delete(listener);
         },
-        // Mirrors what Redux does: a new root object, then notify. Used by the
-        // tests that must re-render through the store rather than by re-rendering
-        // the component by hand.
+        // Mirrors what Redux does: a new root object, then notify.
         patchPost: (patch: Record<string, unknown>) => {
             const posts = {...state.entities.posts.posts};
             posts.p1 = {...posts.p1, ...patch};
             state = {...state, entities: {...state.entities, posts: {...state.entities.posts, posts}}};
-            listeners.forEach((listener) => listener());
+            notify();
+        },
+        patchBranch: (patch: Partial<Branch>) => {
+            state = {...state, [PLUGIN_BRANCH]: {...state[PLUGIN_BRANCH], ...patch}};
+            notify();
         },
     };
 }
 
-function watermark(readerId: string, createAt: number) {
-    return {reader_id: readerId, post_id: 'px', create_at: createAt, read_at: createAt + 100};
-}
+const status = (count: number, truncated = false, readAt: number | null = null) => ({
+    p1: {count, truncated, read_at: readAt},
+});
 
 describe('ReadReceipt in group, private and open channels', () => {
     let container: HTMLDivElement;
@@ -140,7 +151,7 @@ describe('ReadReceipt in group, private and open channels', () => {
 
     it('shows the reader count inline for an own group post', () => {
         setStore(makeStore('G', {
-            watermarks: {ch1: {a: watermark('a', 3000), b: watermark('b', 4000)}},
+            statuses: status(2),
         }) as any);
 
         act(() => root.render(<ReadReceipt postId='p1'/>));
@@ -154,7 +165,7 @@ describe('ReadReceipt in group, private and open channels', () => {
     // silently never mounted.
     it('mounts the indicator when the first indexed reader does not cover the post', () => {
         setStore(makeStore('G', {
-            watermarks: {ch1: {stale: watermark('stale', 1000), fresh: watermark('fresh', 5000)}},
+            statuses: status(1),
         }) as any);
 
         act(() => root.render(<ReadReceipt postId='p1'/>));
@@ -164,7 +175,7 @@ describe('ReadReceipt in group, private and open channels', () => {
 
     it('shows a single delivered tick while nobody has read the post', () => {
         setStore(makeStore('G', {
-            watermarks: {ch1: {stale: watermark('stale', 1000)}},
+            statuses: status(0),
         }) as any);
 
         act(() => root.render(<ReadReceipt postId='p1'/>));
@@ -194,7 +205,7 @@ describe('ReadReceipt in group, private and open channels', () => {
 
     it('does not count the author or the current user', () => {
         setStore(makeStore('G', {
-            receipts: {p1: {me: 9000, other: 9000}},
+            statuses: status(1),
         }, 'other') as any);
 
         act(() => root.render(<ReadReceipt postId='p1'/>));
@@ -206,7 +217,7 @@ describe('ReadReceipt in group, private and open channels', () => {
 
     it('shows a bare checkmark with the read time in a DM instead of a count', () => {
         setStore(makeStore('D', {
-            receipts: {p1: {other: new Date('2024-01-01T10:20:00Z').getTime()}},
+            statuses: status(1, false, new Date('2024-01-01T10:20:00Z').getTime()),
         }) as any);
 
         act(() => root.render(<ReadReceipt postId='p1'/>));
@@ -217,7 +228,7 @@ describe('ReadReceipt in group, private and open channels', () => {
 
     it('requests the reader list once when the count is clicked', () => {
         setStore(makeStore('G', {
-            watermarks: {ch1: {a: watermark('a', 3000)}},
+            statuses: status(1),
         }) as any);
         act(() => root.render(<ReadReceipt postId='p1'/>));
 
@@ -230,8 +241,8 @@ describe('ReadReceipt in group, private and open channels', () => {
 
     it('does not request the reader list again when it is already cached', () => {
         setStore(makeStore('G', {
-            watermarks: {ch1: {a: watermark('a', 3000)}},
-            readers: {p1: {list: [{user_id: 'a', read_at: 3100, exact: true}], truncated: false}},
+            statuses: status(1),
+            readers: {p1: {list: [{user_id: 'a', read_at: 3100, exact: true}], truncated: false, nextOffset: 0}},
         }) as any);
         act(() => root.render(<ReadReceipt postId='p1'/>));
 
@@ -244,8 +255,8 @@ describe('ReadReceipt in group, private and open channels', () => {
 
     it('closes the reader list on Escape', () => {
         setStore(makeStore('G', {
-            watermarks: {ch1: {a: watermark('a', 3000)}},
-            readers: {p1: {list: [{user_id: 'a', read_at: 3100, exact: true}], truncated: false}},
+            statuses: status(1),
+            readers: {p1: {list: [{user_id: 'a', read_at: 3100, exact: true}], truncated: false, nextOffset: 0}},
         }) as any);
         act(() => root.render(<ReadReceipt postId='p1'/>));
         act(() => (document.querySelector('.post-message__text button') as HTMLButtonElement).click());
@@ -260,7 +271,7 @@ describe('ReadReceipt in group, private and open channels', () => {
         (loadPostReaders as jest.Mock).mockRejectedValueOnce(new Error('network down'));
         jest.spyOn(console, 'error').mockImplementation(() => undefined);
         setStore(makeStore('G', {
-            watermarks: {ch1: {a: watermark('a', 3000)}},
+            statuses: status(1),
         }) as any);
         act(() => root.render(<ReadReceipt postId='p1'/>));
 
@@ -281,52 +292,145 @@ describe('ReadReceipt in group, private and open channels', () => {
         expect(document.querySelector('[role="dialog"]')).toBeNull();
         (console.error as jest.Mock).mockRestore();
     });
-    it('re-attaches the indicator after Mattermost rebuilds the message', () => {
-        const store = makeStore('G', {watermarks: {ch1: {a: watermark('a', 3000)}}}) as any;
-        setStore(store);
+    it('re-attaches the indicator after Mattermost rebuilds the message', async () => {
+        setStore(makeStore('G', {statuses: status(1)}) as any);
         act(() => root.render(<ReadReceipt postId='p1'/>));
         expect(indicatorText()).toBe('read 1');
 
-        // What an edit or a reaction does: React rebuilds the message and our
-        // appended node goes with it. Nothing tells this component to re-render,
-        // which is why the post's render key is part of the selector.
+        // What an edit, a reaction or a formatting change does: React rebuilds the
+        // message and our appended node goes with it. Nothing re-renders this
+        // component — it is a sibling of the message, not a child — so an observer
+        // on the post body is what notices.
         const text = document.querySelector('.post-message__text') as HTMLElement;
-        text.innerHTML = '<p>edited</p>';
-        const state = store.getState();
-        state.entities.posts.posts.p1 = {...state.entities.posts.posts.p1, update_at: 5000, edit_at: 5000};
-
-        act(() => root.render(<ReadReceipt postId='p1'/>));
+        await act(async () => {
+            text.innerHTML = '<p>edited</p>';
+            await Promise.resolve();
+        });
 
         expect(indicatorText()).toBe('read 1');
         expect(document.querySelector('.post-message__text p')!.textContent).toContain('edited');
     });
 
-    it('re-attaches when the node was dropped without any state change', () => {
-        setStore(makeStore('G', {watermarks: {ch1: {a: watermark('a', 3000)}}}) as any);
+    it('re-attaches without any Redux action at all', async () => {
+        setStore(makeStore('G', {statuses: status(1)}) as any);
         act(() => root.render(<ReadReceipt postId='p1'/>));
-        expect(indicatorText()).toBe('read 1');
 
         const text = document.querySelector('.post-message__text') as HTMLElement;
-        text.innerHTML = '<p>hello</p>';
-
-        act(() => root.render(<ReadReceipt postId='p1'/>));
+        await act(async () => {
+            // Not a state change of any kind — just the DOM being replaced.
+            text.replaceChildren(document.createElement('p'));
+            await Promise.resolve();
+        });
 
         expect(indicatorText()).toBe('read 1');
     });
-    it('notices a rebuilt message through the store, without being re-rendered by hand', () => {
-        const store = makeStore('G', {watermarks: {ch1: {a: watermark('a', 3000)}}}) as any;
+
+    it('stops observing once the component goes away', async () => {
+        const disconnect = jest.fn();
+        const RealObserver = window.MutationObserver;
+        (window as any).MutationObserver = class {
+            constructor(private cb: MutationCallback) {}
+            observe() {}
+            disconnect() {
+                disconnect();
+            }
+            takeRecords() {
+                return [];
+            }
+        };
+
+        setStore(makeStore('G', {statuses: status(1)}) as any);
+        act(() => root.render(<ReadReceipt postId='p1'/>));
+        act(() => root.unmount());
+
+        expect(disconnect).toHaveBeenCalled();
+        (window as any).MutationObserver = RealObserver;
+        root = createRoot(container);
+    });
+
+    it('opens the reader list immediately and keeps it dismissable when the request fails', async () => {
+        (loadPostReaders as jest.Mock).mockRejectedValueOnce(new Error('network down'));
+        jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        setStore(makeStore('G', {statuses: status(1)}) as any);
+        act(() => root.render(<ReadReceipt postId='p1'/>));
+
+        await act(async () => {
+            (document.querySelector('.post-message__text button') as HTMLButtonElement).click();
+            await Promise.resolve();
+        });
+
+        // Rendering only once the readers arrive would strand a failed request:
+        // the open flag stays true while nothing — not even Escape — is mounted.
+        const dialog = document.querySelector('[role="dialog"]');
+        expect(dialog).not.toBeNull();
+        expect(dialog!.textContent).toContain('Could not load');
+
+        act(() => {
+            document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}));
+        });
+        expect(document.querySelector('[role="dialog"]')).toBeNull();
+        (console.error as jest.Mock).mockRestore();
+    });
+
+    it('names readers as soon as their profiles arrive, with no other action', async () => {
+        const store = makeStore('G', {
+            statuses: status(1),
+            readers: {p1: {list: [{user_id: 'a', read_at: 3100, exact: true}], truncated: false, nextOffset: 0}},
+        }) as any;
         setStore(store);
         act(() => root.render(<ReadReceipt postId='p1'/>));
-        expect(indicatorText()).toBe('read 1');
+        act(() => (document.querySelector('.post-message__text button') as HTMLButtonElement).click());
 
-        // In the real client nothing re-renders this component when the message
-        // around it is rebuilt — it is a sibling of the message, not a child. The
-        // only thing that can wake it is a store change it actually selects, which
-        // is why the post's render key is part of the selected value.
-        const text = document.querySelector('.post-message__text') as HTMLElement;
-        text.innerHTML = '<p>edited</p>';
-        act(() => store.patchPost({update_at: 5000, edit_at: 5000}));
+        // Readers are here, profiles are not: the raw id stands in for the name.
+        expect(document.querySelector('[role="dialog"]')!.textContent).toContain('a ·');
 
-        expect(indicatorText()).toBe('read 1');
+        act(() => store.patchBranch({profiles: {a: {username: 'ada'}}, profilesRevision: 1}));
+
+        expect(document.querySelector('[role="dialog"]')!.textContent).toContain('ada');
+    });
+
+    it('renders nothing in a channel type the administrator disabled', () => {
+        setStore(makeStore('O', {statuses: status(2)}, 'me', 'D') as any);
+
+        act(() => root.render(<ReadReceipt postId='p1'/>));
+
+        expect(container.innerHTML).toBe('');
+        expect(indicatorText()).toBe('');
+    });
+
+    it('renders nothing before the configuration is known', () => {
+        setStore(makeStore('G', {statuses: status(2)}, 'me', '') as any);
+
+        act(() => root.render(<ReadReceipt postId='p1'/>));
+
+        expect(container.innerHTML).toBe('');
+    });
+
+    it('does not report a read in a channel type the administrator disabled', () => {
+        setStore(makeStore('O', {}, 'other', 'D') as any);
+
+        act(() => root.render(<ReadReceipt postId='p1'/>));
+
+        // No sentinel means nothing is ever observed and no read is ever sent.
+        expect(container.querySelector('span[aria-hidden="true"]')).toBeNull();
+    });
+
+    it('does not render an indicator for a thread reply', () => {
+        const store = makeStore('G', {statuses: status(2)}) as any;
+        store.patchPost({root_id: 'root1'});
+
+        act(() => root.render(<ReadReceipt postId='p1'/>));
+
+        expect(container.innerHTML).toBe('');
+    });
+
+    it('shows a truncated count as a lower bound rather than an exact number', () => {
+        setStore(makeStore('O', {statuses: status(200, true)}) as any);
+
+        act(() => root.render(<ReadReceipt postId='p1'/>));
+
+        // 200 readers were counted, but the channel has more: printing "200" would
+        // claim a precision the server explicitly said it does not have.
+        expect(indicatorText()).toBe('read 200+');
     });
 });

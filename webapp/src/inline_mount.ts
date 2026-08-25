@@ -30,10 +30,14 @@ function resolveTextTarget(body: HTMLElement): HTMLElement | null {
     return text as HTMLElement;
 }
 
+export function resolvePostBody(sentinel: HTMLElement): HTMLElement | null {
+    return sentinel.closest('.post__body') as HTMLElement | null;
+}
+
 // Mattermost mounts attachment components as a block under the post. A portal
 // into the message text is therefore required to avoid changing post height.
 export function createInlineMount(sentinel: HTMLElement): InlineMount | null {
-    const body = sentinel.closest('.post__body') as HTMLElement | null;
+    const body = resolvePostBody(sentinel);
     if (!body) {
         return null;
     }
@@ -51,4 +55,28 @@ export function createInlineMount(sentinel: HTMLElement): InlineMount | null {
         body.appendChild(target);
     }
     return {target, strategy, dispose: () => target.remove()};
+}
+
+/**
+ * Watches one post body and calls back when our mounted node stops being part of
+ * it. React owns that subtree: an edit, a reaction, a formatting change or any
+ * other rebuild of the message discards foreign children, and this component is a
+ * sibling of the message rather than a child, so nothing else would tell it.
+ *
+ * A narrow observer replaces the previous approach of selecting more and more
+ * Redux fields in the hope that one of them changes whenever the DOM does — that
+ * only ever covered the causes somebody had thought of. This is scoped to a single
+ * element, fires only on child changes, and does no polling.
+ */
+export function observeMountRemoval(body: HTMLElement, isMounted: () => boolean, onRemoved: () => void): () => void {
+    if (typeof MutationObserver !== 'function') {
+        return () => undefined;
+    }
+    const observer = new MutationObserver(() => {
+        if (!isMounted()) {
+            onRemoved();
+        }
+    });
+    observer.observe(body, {childList: true, subtree: true});
+    return () => observer.disconnect();
 }

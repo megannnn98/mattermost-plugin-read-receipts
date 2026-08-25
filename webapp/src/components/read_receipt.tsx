@@ -8,8 +8,8 @@ import {getVisibilityTracker, VisibilityState} from '../visibility';
 import {formatReadTime, getLocaleFromState, t, SupportedLocale} from '../i18n';
 import {usePluginSelector} from '../hooks';
 import {getPostContext, shouldReportRead} from '../gating';
-import {selectPostReadCount, selectSingleReaderReadAt, selectPluginState} from '../selectors';
-import {createInlineMount, InlineMount} from '../inline_mount';
+import {selectPostReaders, selectPostStatus, selectProfilesRevision, selectReaderProfile} from '../selectors';
+import {createInlineMount, InlineMount, observeMountRemoval, resolvePostBody} from '../inline_mount';
 import {ReadersPopover, ReadersStatus} from './readers_popover';
 import {StatusTicks} from './status_ticks';
 import {GlobalState} from '../types';
@@ -31,14 +31,6 @@ const isOwnPost = (state: GlobalState, postId: string): boolean => {
     return post ? post.user_id === state?.entities?.users?.currentUserId : false;
 };
 
-const isDMChannel = (state: GlobalState, postId: string): boolean => {
-    const post = state?.entities?.posts?.posts?.[postId];
-    const channel = post && state?.entities?.channels?.channels?.[post.channel_id];
-    return channel?.type === 'D';
-};
-
-const isEligibleChannel = (state: GlobalState, postId: string): boolean => Boolean(getPostContext(state, postId)?.isEligibleChannel);
-
 /**
  * A post counts as delivered once the server has accepted it — which is exactly
  * what the single checkmark means in the messengers this indicator is modelled
@@ -56,64 +48,35 @@ const isDelivered = (state: GlobalState, postId: string): boolean => {
     return !pending && post.state !== 'FAILED';
 };
 
-/**
- * A key that changes exactly when Mattermost rebuilds the rendered message.
- *
- * The indicator lives in a node appended into React-owned DOM, so an edit or a
- * reaction re-renders the message and throws that node away — measured in a real
- * client, where the checkmark disappeared until a full reload. This component is
- * a sibling of the message, so nothing would tell it to re-attach; selecting the
- * fields that drive that re-render is what makes it notice.
- */
-const selectRenderKey = (state: GlobalState, postId: string): string => {
-    const post = state?.entities?.posts?.posts?.[postId];
-    const reactions = (state?.entities?.posts as {reactions?: Record<string, Record<string, unknown>>} | undefined)?.reactions?.[postId];
-    if (!post) {
-        return '';
-    }
-    return `${post.update_at ?? 0}|${post.edit_at ?? 0}|${reactions ? Object.keys(reactions).length : 0}`;
-};
-
-const selectReadAt = (state: GlobalState, postId: string): number | null => {
-    const ctx = getPostContext(state, postId);
-    if (!ctx || !ctx.isOwn) {
-        return null;
-    }
-    return selectSingleReaderReadAt(state, postId, ctx.createAt, ctx.channelId);
-};
-
 type Display = {
     isOwn: boolean;
     isDM: boolean;
     eligible: boolean;
+    isThreadReply: boolean;
     delivered: boolean;
-    readAt: number | null;
     count: number;
-    renderKey: string;
+    truncated: boolean;
+    readAt: number | null;
     readers: unknown;
+    // Selected purely so that a profile arriving while the reader list is open
+    // re-renders it. The profile map itself is read during render.
+    profilesRevision: number;
 };
 
 const isEqualDisplay = (a: Display, b: Display): boolean =>
     a.isOwn === b.isOwn &&
     a.isDM === b.isDM &&
     a.eligible === b.eligible &&
+    a.isThreadReply === b.isThreadReply &&
     a.delivered === b.delivered &&
-    a.readAt === b.readAt &&
     a.count === b.count &&
-    a.renderKey === b.renderKey &&
-    a.readers === b.readers;
+    a.truncated === b.truncated &&
+    a.readAt === b.readAt &&
+    a.readers === b.readers &&
+    a.profilesRevision === b.profilesRevision;
 
 interface ReadReceiptProps {
     postId: string;
-}
-
-function selectReadCount(state: GlobalState, postId: string): number {
-    const context = getPostContext(state, postId);
-    const post = state.entities?.posts?.posts?.[postId];
-    if (!context || !post) {
-        return 0;
-    }
-    return selectPostReadCount(state, postId, context.createAt, context.channelId, post.user_id);
 }
 
 export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
@@ -132,18 +95,24 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
 
     const store = getStore();
 
-    const {isOwn, isDM, eligible, delivered, readAt, count, renderKey} = usePluginSelector(
+    const {isOwn, isDM, eligible, isThreadReply, delivered, count, truncated, readAt} = usePluginSelector(
         store,
-        (state) => ({
-            isOwn: isOwnPost(state, postId),
-            isDM: isDMChannel(state, postId),
-            eligible: isEligibleChannel(state, postId),
-            delivered: isDelivered(state, postId),
-            readAt: selectReadAt(state, postId),
-            count: selectReadCount(state, postId),
-            renderKey: selectRenderKey(state, postId),
-            readers: selectPluginState(state).readers[postId],
-        }),
+        (state) => {
+            const context = getPostContext(state, postId);
+            const status = selectPostStatus(state, postId);
+            return {
+                isOwn: isOwnPost(state, postId),
+                isDM: Boolean(context?.isDM),
+                eligible: Boolean(context?.isEligibleChannel),
+                isThreadReply: Boolean(context?.isThreadReply),
+                delivered: isDelivered(state, postId),
+                count: status.count,
+                truncated: status.truncated,
+                readAt: status.read_at,
+                readers: selectPostReaders(state, postId),
+                profilesRevision: selectProfilesRevision(state),
+            };
+        },
         isEqualDisplay,
     );
     const locale = usePluginSelector<SupportedLocale>(store, (state) => getLocaleFromState(state));
@@ -152,32 +121,32 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         if (!isOwn || !delivered || !sentinelRef.current) {
             return undefined;
         }
+        const body = resolvePostBody(sentinelRef.current);
         const mount = createInlineMount(sentinelRef.current);
         mountRef.current = mount;
         setInlineTarget(mount?.target ?? null);
+
+        // React owns the message subtree and discards foreign children whenever it
+        // rebuilds it — an edit, a reaction, a formatting change. This component is
+        // a sibling of the message, so no render of ours is triggered by that; the
+        // observer is what notices, and remounting is what puts the indicator back.
+        const stopObserving = body ? observeMountRemoval(
+            body,
+            () => Boolean(mountRef.current?.target.isConnected),
+            () => setRemounts((n) => n + 1),
+        ) : () => undefined;
+
         return () => {
+            stopObserving();
             mount?.dispose();
             mountRef.current = null;
             setInlineTarget(null);
         };
-        // `renderKey` and `remounts` are dependencies on purpose: the first
-        // re-runs the mount when Mattermost rebuilt the message around our node,
-        // the second when the check below found the node already detached.
-    }, [isOwn, delivered, renderKey, remounts]);
-
-    // Runs after every render and costs one `isConnected` read. A detached target
-    // means React dropped our node while rendering something else; bumping the
-    // counter re-runs the mount above. When the node is still attached this is a
-    // no-op, so there is no render loop and no observer or polling involved.
-    //
-    // It reads the ref, not the state: in the commit where the mount above just
-    // re-attached, the rendered `inlineTarget` is still the previous, detached
-    // node, and comparing against it would bump the counter forever.
-    useEffect(() => {
-        if (mountRef.current && !mountRef.current.target.isConnected) {
-            setRemounts((n) => n + 1);
-        }
-    });
+        // `isOwn` matters as much as the rest: ownership is not known until the
+        // post is in the store, so an effect that skipped it would keep whatever
+        // it decided on the first render. `remounts` re-runs the mount after the
+        // observer saw our node go.
+    }, [isOwn, delivered, remounts]);
 
     useEffect(() => {
         let disposed = false;
@@ -325,7 +294,11 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         // to true is what actually binds the observer to the mounted sentinel.
     }, [postId, store, eligible]);
 
-    if (!eligible) {
+    // Thread replies are out of scope for this version. A reply lives in the same
+    // channel as its root, so tracking it would let a reply read in the sidebar
+    // advance the channel watermark and mark every older message read. Root posts
+    // still get an indicator wherever they are rendered, including the sidebar.
+    if (!eligible || isThreadReply) {
         return null;
     }
 
@@ -344,15 +317,22 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
     }
 
     const state = store?.getState();
-    const cachedReaders = state ? selectPluginState(state).readers[postId] : undefined;
-    const profiles = state ? {...(state.entities?.users?.profiles ?? {}), ...selectPluginState(state).profiles} : {};
+    const cachedReaders = state ? selectPostReaders(state, postId) : undefined;
+    const nameOf = (userId: string) => (state ? selectReaderProfile(state, userId) : undefined);
+
+    const loadReaders = (offset: number) => {
+        if (!store) {
+            return;
+        }
+        setReadersFailed(false);
+        loadPostReaders(store, postId, offset).catch((error) => {
+            console.error(`[${PLUGIN_ID}] Failed to load post readers:`, error);
+            setReadersFailed(true);
+        });
+    };
     const openPopover = () => {
-        if (!cachedReaders && store) {
-            setReadersFailed(false);
-            loadPostReaders(store, postId).catch((error) => {
-                console.error(`[${PLUGIN_ID}] Failed to load post readers:`, error);
-                setReadersFailed(true);
-            });
+        if (!cachedReaders) {
+            loadReaders(0);
         }
         setPopoverOpen(true);
     };
@@ -391,7 +371,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
                 ref={anchorRef}
                 type='button'
                 onClick={openPopover}
-                aria-label={t(locale, 'readCount', {count: String(count)})}
+                aria-label={truncated ? t(locale, 'readCountAtLeastLabel', {count: String(count)}) : t(locale, 'readCount', {count: String(count)})}
                 // inline-flex, not per-child vertical-align: the wrapper collapses
                 // its line box to keep the post height, and aligning children
                 // against a collapsed line box drops the count like a subscript.
@@ -414,7 +394,11 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
                     status='read'
                     label={t(locale, 'read')}
                 />
-                <span style={{fontSize: 11, color: 'var(--center-channel-color, #3f4350)', opacity: 0.72}}>{count}</span>
+                {/* A truncated count is a lower bound, so it must not be printed
+                    as if it were the exact number of readers. */}
+                <span style={{fontSize: 11, color: 'var(--center-channel-color, #3f4350)', opacity: 0.72}}>
+                    {truncated ? t(locale, 'readCountAtLeast', {count: String(count)}) : String(count)}
+                </span>
             </button>
         );
     }
@@ -447,8 +431,9 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
                     readers={cachedReaders?.list ?? []}
                     status={readersStatus}
                     truncated={cachedReaders?.truncated ?? false}
-                    profiles={profiles}
+                    nameOf={nameOf}
                     locale={locale}
+                    onLoadMore={cachedReaders?.nextOffset ? () => loadReaders(cachedReaders.nextOffset) : undefined}
                     onClose={() => setPopoverOpen(false)}
                 />
             )}

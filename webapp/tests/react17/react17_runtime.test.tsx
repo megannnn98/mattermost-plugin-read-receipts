@@ -6,7 +6,7 @@ import {usePluginSelector} from '../../src/hooks';
 import ReadReceipt from '../../src/components/read_receipt';
 import {setStore} from '../../src/store_ref';
 
-jest.mock('../../src/actions', () => ({sendReadReceipt: jest.fn()}));
+jest.mock('../../src/actions', () => ({sendReadReceipt: jest.fn(), loadPostReaders: jest.fn().mockResolvedValue(undefined)}));
 jest.mock('../../src/visibility', () => ({
     getVisibilityTracker: () => ({isActive: () => true, subscribe: () => () => undefined}),
 }));
@@ -77,7 +77,13 @@ describe('React 17 runtime', () => {
                 channels: {channels: {dm1: {id: 'dm1', type: 'D'}}},
                 posts: {posts: {p1: {id: 'p1', user_id: 'me', channel_id: 'dm1', create_at: 1}}},
             },
-            [`plugins-com.integrasources.read-receipts`]: {receipts: {p1: {reader: 60000}}, watermarks: {}, readers: {}, profiles: {}},
+            'plugins-com.integrasources.read-receipts': {
+                statuses: {p1: {count: 1, truncated: false, read_at: 60000}},
+                readers: {},
+                profiles: {},
+                profilesRevision: 0,
+                config: {enabled_channel_types: 'DGPO'},
+            },
         }));
 
         const postBody = document.createElement('div');
@@ -103,10 +109,11 @@ describe('React 17 runtime', () => {
                 posts: {posts: {p1: {id: 'p1', user_id: 'me', channel_id: 'g1', create_at: 1000}}},
             },
             'plugins-com.integrasources.read-receipts': {
-                receipts: {},
-                watermarks: {g1: {a: {reader_id: 'a', post_id: 'px', create_at: 5000, read_at: 5100}}},
-                readers: {p1: {list: [{user_id: 'a', read_at: 5100, exact: true}], truncated: false}},
+                statuses: {p1: {count: 1, truncated: false, read_at: null}},
+                readers: {p1: {list: [{user_id: 'a', read_at: 5100, exact: true}], truncated: false, nextOffset: 0}},
                 profiles: {a: {username: 'ada'}},
+                profilesRevision: 1,
+                config: {enabled_channel_types: 'DGPO'},
             },
         }));
 

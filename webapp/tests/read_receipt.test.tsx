@@ -6,6 +6,7 @@ import ReadReceipt from '../src/components/read_receipt';
 import {setStore} from '../src/store_ref';
 import {getVisibilityTracker} from '../src/visibility';
 import {sendReadReceipt} from '../src/actions';
+import {BRANCH, pluginBranch} from './helpers';
 
 jest.mock('../src/client', () => ({
     PLUGIN_ID: 'com.integrasources.read-receipts',
@@ -15,6 +16,7 @@ jest.mock('../src/client', () => ({
 
 jest.mock('../src/actions', () => ({
     sendReadReceipt: jest.fn().mockResolvedValue(true),
+    loadPostReaders: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('../src/visibility', () => {
@@ -80,6 +82,7 @@ function entryFor(visible: boolean): IOEntry {
 
 function makeState() {
     return {
+        [BRANCH]: pluginBranch(),
         entities: {
             users: {currentUserId: 'me'},
             channels: {
@@ -287,6 +290,7 @@ describe('ReadReceipt component', () => {
     it('attaches the observer when the channel entity arrives after mount', () => {
         const listeners: Array<() => void> = [];
         const withoutChannel: any = {
+            [BRANCH]: pluginBranch(),
             entities: {
                 users: {currentUserId: 'me'},
                 channels: {currentChannelId: 'channel1', channels: {}},
