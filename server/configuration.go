@@ -6,7 +6,13 @@ const (
 	defaultRetentionDays = 30
 	minRetentionDays     = 1
 	maxRetentionDays     = 3650
-	defaultChannelTypes  = "DGPO"
+	// v0.1.0 was direct-messages only. Enabling group, private and open channels
+	// on upgrade would silently start collecting read receipts across an entire
+	// installation, so the default stays at what the previous version did and an
+	// administrator has to opt in per channel type.
+	defaultChannelTypes = "D"
+	// The set of characters `EnabledChannelTypes` may contain, in canonical order.
+	allChannelTypes = "DGPO"
 )
 
 type configuration struct {
@@ -83,7 +89,7 @@ func (c *configuration) validate() (*configuration, []string) {
 func normalizeChannelTypes(types string) string {
 	var normalized strings.Builder
 	for _, channelType := range strings.ToUpper(types) {
-		if !strings.ContainsRune(defaultChannelTypes, channelType) || strings.ContainsRune(normalized.String(), channelType) {
+		if !strings.ContainsRune(allChannelTypes, channelType) || strings.ContainsRune(normalized.String(), channelType) {
 			continue
 		}
 		normalized.WriteRune(channelType)
@@ -91,12 +97,17 @@ func normalizeChannelTypes(types string) string {
 	return normalized.String()
 }
 
-func (c *configuration) channelTypeEnabled(channelType string) bool {
-	types := defaultChannelTypes
+// enabledChannelTypes returns the validated set, falling back to the default for
+// a configuration that was never loaded.
+func (c *configuration) enabledChannelTypes() string {
 	if c != nil && c.EnabledChannelTypes != "" {
-		types = c.EnabledChannelTypes
+		return c.EnabledChannelTypes
 	}
-	return strings.Contains(types, channelType)
+	return defaultChannelTypes
+}
+
+func (c *configuration) channelTypeEnabled(channelType string) bool {
+	return channelType != "" && strings.Contains(c.enabledChannelTypes(), channelType)
 }
 
 // applyConfiguration validates the raw config, stores the clamped copy and logs

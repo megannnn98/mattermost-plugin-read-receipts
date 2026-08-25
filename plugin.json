@@ -42,9 +42,9 @@
                 "key": "EnabledChannelTypes",
                 "display_name": "Enabled channel types",
                 "type": "text",
-                "help_text": "Channel types to enable: D (direct), G (group), P (private), O (open). Invalid characters are ignored; empty values fall back to DGPO.",
-                "default": "DGPO",
-                "placeholder": "DGPO"
+                "help_text": "Channel types to collect read receipts in: D (direct), G (group), P (private), O (open). The default is D only — enabling G, P or O starts collecting read receipts for everyone in those channels, so it is an explicit decision. Invalid characters are ignored; an empty value falls back to D.",
+                "default": "D",
+                "placeholder": "D"
             }
         ]
     }
