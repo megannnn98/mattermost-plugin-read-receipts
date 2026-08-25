@@ -1,11 +1,13 @@
-import React, {useEffect, useRef, useState} from 'react';
+import React, {useEffect, useRef} from 'react';
 
 import {sendReadReceipt} from '../actions';
 import {getStore} from '../store_ref';
 import {getVisibilityTracker, VisibilityState} from '../visibility';
-import {isPostRead, selectPostReadAt} from '../selectors';
+import {formatReadTime, getLocaleFromState, t, SupportedLocale} from '../i18n';
+import {usePluginSelector} from '../hooks';
 import {getPostContext, shouldReportRead} from '../gating';
-import {formatReadTime, getLocaleFromState, t} from '../i18n';
+import {selectPostReadAt} from '../selectors';
+import {GlobalState} from '../types';
 import {
     isSufficientlyVisible,
     resolveObservedElement,
@@ -17,6 +19,30 @@ const RETRY_BACKOFF_MS = 5000;
 
 type SendStatus = 'idle' | 'pending' | 'sent';
 
+const isOwnPost = (state: GlobalState, postId: string): boolean => {
+    const post = state?.entities?.posts?.posts?.[postId];
+    return post ? post.user_id === state?.entities?.users?.currentUserId : false;
+};
+
+const isDMChannel = (state: GlobalState, postId: string): boolean => {
+    const post = state?.entities?.posts?.posts?.[postId];
+    const channel = post && state?.entities?.channels?.channels?.[post.channel_id];
+    return channel?.type === 'D';
+};
+
+const selectReadAt = (state: GlobalState, postId: string): number | null => {
+    const ctx = getPostContext(state, postId);
+    if (!ctx || !ctx.isOwn) {
+        return null;
+    }
+    return selectPostReadAt(state, postId, ctx.createAt, ctx.channelId);
+};
+
+const isEqualDisplay = (
+    a: {isOwn: boolean; isDM: boolean; readAt: number | null},
+    b: {isOwn: boolean; isDM: boolean; readAt: number | null},
+): boolean => a.isOwn === b.isOwn && a.isDM === b.isDM && a.readAt === b.readAt;
+
 interface ReadReceiptProps {
     postId: string;
 }
@@ -27,32 +53,33 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
     const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lastSufficientlyVisibleRef = useRef(false);
     const statusRef = useRef<SendStatus>('idle');
-    const [, forceUpdate] = useState(0);
 
     const store = getStore();
 
+    const {isOwn, isDM, readAt} = usePluginSelector(
+        store,
+        (state) => ({
+            isOwn: isOwnPost(state, postId),
+            isDM: isDMChannel(state, postId),
+            readAt: selectReadAt(state, postId),
+        }),
+        isEqualDisplay,
+    );
+    const locale = usePluginSelector<SupportedLocale>(store, (state) => getLocaleFromState(state));
+
     useEffect(() => {
         if (!store) {
-            return;
-        }
-
-        const unsubscribe = store.subscribe(() => {
-            forceUpdate((n) => n + 1);
-        });
-        return () => unsubscribe();
-    }, [store]);
-
-    useEffect(() => {
-        if (!store) {
-            return;
-        }
-
-        const ctx = getPostContext(store.getState(), postId);
-        if (!ctx || ctx.isOwn) {
             return;
         }
 
         const tracker = getVisibilityTracker();
+
+        // Own posts never auto-report; their display is driven purely by the
+        // received receipts/watermark state selectors above.
+        const initial = getPostContext(store.getState(), postId);
+        if (!initial || initial.isOwn) {
+            return;
+        }
 
         const clearDwell = () => {
             if (dwellTimerRef.current) {
@@ -165,17 +192,11 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         };
     }, [postId, store]);
 
-    if (!store) {
+    if (!isDM) {
         return null;
     }
 
-    const state = store.getState();
-    const ctx = getPostContext(state, postId);
-    if (!ctx || !ctx.isDM) {
-        return null;
-    }
-
-    if (!ctx.isOwn) {
+    if (!isOwn) {
         return (
             <span
                 ref={sentinelRef}
@@ -185,16 +206,10 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         );
     }
 
-    if (!isPostRead(state, postId, ctx.createAt, ctx.channelId)) {
-        return null;
-    }
-
-    const readAt = selectPostReadAt(state, postId, ctx.createAt, ctx.channelId);
     if (!readAt) {
         return null;
     }
 
-    const locale = getLocaleFromState(state);
     const time = formatReadTime(readAt, locale);
 
     return (
