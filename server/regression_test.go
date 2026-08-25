@@ -132,6 +132,43 @@ func TestAdvanceWatermark_MonotonicUnderConcurrency(t *testing.T) {
 
 // --- Partial KV failures ----------------------------------------------------
 
+func TestMarkAsRead_WatermarkKeepsFirstReceiptTimeAfterRetry(t *testing.T) {
+	kv := newFakeKV()
+	p, api := setupTestPlugin(t)
+	wireKV(api, kv)
+	api.On("PublishWebSocketEvent", wsEventReceipt, mock.Anything, mock.Anything).Return()
+
+	readerID := validID("readerRetry")
+	channelID := validID("channelRetry")
+	postID := validID("postRetry")
+	post := &model.Post{Id: postID, UserId: validID("author"), ChannelId: channelID, CreateAt: 1000}
+	channel := &model.Channel{Id: channelID, Type: model.ChannelTypeDirect}
+
+	const firstReadAt int64 = 1000
+	const retryAt int64 = 2000
+	p.clock = func() int64 { return firstReadAt }
+	failWatermark := true
+	kv.failSet = func(key string) *model.AppError {
+		if failWatermark && key == wmKey(channelID, readerID) {
+			return model.NewAppError("kv", "watermark failed", nil, "", http.StatusInternalServerError)
+		}
+		return nil
+	}
+
+	_, err := p.markAsRead(readerID, post, channel)
+	require.Error(t, err, "the receipt was written, but the failed watermark must fail the request")
+
+	p.clock = func() int64 { return retryAt }
+	failWatermark = false
+	receipt, err := p.markAsRead(readerID, post, channel)
+	require.NoError(t, err)
+	assert.Equal(t, firstReadAt, receipt.ReadAt, "the existing per-post receipt is the source of the retry time")
+
+	var watermark Watermark
+	require.NoError(t, json.Unmarshal(kv.get(wmKey(channelID, readerID)), &watermark))
+	assert.Equal(t, firstReadAt, watermark.ReadAt, "a watermark retry must not move read_at forward")
+}
+
 func TestMarkAsRead_ReceiptWriteFailureLeavesWatermarkUntouched(t *testing.T) {
 	p, api := setupTestPlugin(t)
 

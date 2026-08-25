@@ -83,7 +83,7 @@ func (p *Plugin) handleRead(w http.ResponseWriter, r *http.Request) {
 func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Channel) (*Receipt, error) {
 	config := p.getConfiguration()
 	ttlSeconds := config.retentionSeconds()
-	now := nowMillis()
+	now := p.now()
 
 	// 0. The watermark is the authority on "already read": it covers every post
 	// up to its create_at and never expires. A post it covers was read earlier,
@@ -138,7 +138,7 @@ func (p *Plugin) markAsRead(readerID string, post *model.Post, channel *model.Ch
 	// 2. Raise the watermark. On failure the state stays conservative (receipt is
 	// written, watermark lags) and no WS event is published — a repeated request
 	// fixes it.
-	advanced, err := p.advanceWatermark(channel.Id, readerID, post, now)
+	advanced, err := p.advanceWatermark(channel.Id, readerID, post, receipt.ReadAt)
 	if err != nil {
 		return nil, err
 	}

@@ -13,8 +13,9 @@ import (
 // semantics, so race-sensitive code paths (e.g. the watermark CAS loop) can be
 // exercised under go test -race.
 type fakeKV struct {
-	mu sync.Mutex
-	m  map[string][]byte
+	mu      sync.Mutex
+	m       map[string][]byte
+	failSet func(key string) *model.AppError
 }
 
 func newFakeKV() *fakeKV {
@@ -87,9 +88,17 @@ func wireKV(api *plugintest.API, kv *fakeKV) {
 	)
 	api.On("KVSetWithOptions", mock.Anything, mock.Anything, mock.Anything).Return(
 		func(key string, value []byte, options model.PluginKVSetOptions) bool {
+			if kv.failSet != nil && kv.failSet(key) != nil {
+				return false
+			}
 			ok, _ := kv.kvSet(key, value, options)
 			return ok
 		},
-		func(key string, value []byte, options model.PluginKVSetOptions) *model.AppError { return nil },
+		func(key string, value []byte, options model.PluginKVSetOptions) *model.AppError {
+			if kv.failSet == nil {
+				return nil
+			}
+			return kv.failSet(key)
+		},
 	)
 }

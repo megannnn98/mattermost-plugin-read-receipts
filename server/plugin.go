@@ -25,6 +25,14 @@ type Plugin struct {
 	configuration *configuration
 
 	router *http.ServeMux
+	clock  func() int64
+}
+
+func (p *Plugin) now() int64 {
+	if p.clock != nil {
+		return p.clock()
+	}
+	return nowMillis()
 }
 
 func (p *Plugin) OnActivate() error {
