@@ -1,11 +1,16 @@
 import {ReadReceiptsPlugin} from '../src/index';
 import {WS_EVENT} from '../src/websocket';
 
+import * as client from '../src/client';
+
 jest.mock('../src/client', () => ({
     PLUGIN_ID: 'com.integrasources.read-receipts',
-    fetchChannelReceipts: jest.fn().mockResolvedValue({watermark: null, receipts: {}}),
+    fetchChannelReceipts: jest.fn().mockResolvedValue({posts: {}, truncated: false}),
+    fetchPluginConfig: jest.fn().mockResolvedValue({enabled_channel_types: 'D'}),
     reportRead: jest.fn(),
 }));
+
+const mockedConfig = client.fetchPluginConfig as jest.MockedFunction<typeof client.fetchPluginConfig>;
 
 function makeRegistry() {
     return {
@@ -66,6 +71,27 @@ describe('plugin entry point', () => {
         expect(registry.registerPostMessageAttachmentComponent).toHaveBeenCalledTimes(1);
         expect(registry.registerWebSocketEventHandler).toHaveBeenCalledWith(WS_EVENT, expect.any(Function));
         expect(registry.registerReconnectHandler).toHaveBeenCalledWith(expect.any(Function));
+
+        plugin.uninitialize();
+    });
+    it('loads the plugin configuration at startup and again on reconnect', async () => {
+        (window as any).desktopAPI = {getAppInfo: jest.fn().mockResolvedValue({name: 'Mattermost', version: '5.0.0'})};
+        const registry = makeRegistry();
+        const store = makeStore();
+        mockedConfig.mockClear();
+
+        const plugin = new ReadReceiptsPlugin();
+        plugin.initialize(registry as never, store as never);
+        await Promise.resolve();
+
+        // Nothing is gated on a guess: until this lands the plugin stays inert.
+        expect(mockedConfig).toHaveBeenCalledTimes(1);
+
+        // A reconnect is where an administrator's change would otherwise go
+        // unnoticed until a full reload.
+        registry.registerReconnectHandler.mock.calls[0][0]();
+        await Promise.resolve();
+        expect(mockedConfig).toHaveBeenCalledTimes(2);
 
         plugin.uninitialize();
     });
