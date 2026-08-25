@@ -6,6 +6,7 @@ export interface PostContext {
     createAt: number;
     isOwn: boolean;
     isDM: boolean;
+    isEligibleChannel: boolean;
     isCurrentChannel: boolean;
     isDeleted: boolean;
 }
@@ -25,6 +26,7 @@ export function getPostContext(state: GlobalState, postId: string): PostContext 
         createAt: post.create_at,
         isOwn: post.user_id === state?.entities?.users?.currentUserId,
         isDM: channel?.type === 'D',
+        isEligibleChannel: Boolean(channel && 'DGPO'.includes(channel.type)),
         isCurrentChannel: channelId === state?.entities?.channels?.currentChannelId,
         isDeleted: Boolean(post.delete_at) || post.state === 'DELETED',
     };
@@ -40,5 +42,5 @@ export function shouldReportRead(state: GlobalState, postId: string): boolean {
     if (!ctx) {
         return false;
     }
-    return ctx.isDM && ctx.isCurrentChannel && !ctx.isOwn && !ctx.isDeleted;
+    return ctx.isEligibleChannel && ctx.isCurrentChannel && !ctx.isOwn && !ctx.isDeleted;
 }

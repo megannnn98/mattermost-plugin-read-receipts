@@ -5,12 +5,12 @@ export const MAX_QUERY_IDS = 200;
 export const RETRY_BASE_MS = 5000;
 export const RETRY_MAX_MS = 60000;
 
-export function isDirectChannel(state: GlobalState, channelId: string): boolean | null {
+export function isEligibleChannel(state: GlobalState, channelId: string): boolean | null {
     const channel = state?.entities?.channels?.channels?.[channelId];
     if (!channel) {
         return null;
     }
-    return channel.type === 'D';
+    return 'DGPO'.includes(channel.type);
 }
 
 /**
@@ -96,12 +96,12 @@ export function startChannelWatcher(store: PluginStore): ChannelWatcher {
             return;
         }
 
-        const isDM = isDirectChannel(state, channelId);
-        if (isDM === null) {
+        const eligible = isEligibleChannel(state, channelId);
+        if (eligible === null) {
             // Channel entity not loaded yet — retry on a later store update.
             return;
         }
-        if (!isDM) {
+        if (!eligible) {
             handledChannelId = channelId;
             return;
         }

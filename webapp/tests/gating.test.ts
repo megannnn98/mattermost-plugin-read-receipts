@@ -57,10 +57,10 @@ describe('shouldReportRead', () => {
         expect(shouldReportRead(makeState(), 'otherChannel')).toBe(false);
     });
 
-    it('does not report posts outside DM channels', () => {
+    it('reports posts in an eligible open channel', () => {
         const state = makeState();
         state.entities.channels.currentChannelId = 'town';
-        expect(shouldReportRead(state, 'inTown')).toBe(false);
+        expect(shouldReportRead(state, 'inTown')).toBe(true);
     });
 
     it('does not report deleted posts', () => {

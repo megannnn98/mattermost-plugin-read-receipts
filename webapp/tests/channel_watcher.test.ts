@@ -1,4 +1,4 @@
-import {collectOwnPostIds, isDirectChannel, RETRY_BASE_MS, startChannelWatcher} from '../src/channel_watcher';
+import {collectOwnPostIds, isEligibleChannel, RETRY_BASE_MS, startChannelWatcher} from '../src/channel_watcher';
 import * as actions from '../src/actions';
 import {ACTION_TYPES} from '../src/reducer';
 import * as client from '../src/client';
@@ -159,14 +159,14 @@ describe('collectOwnPostIds', () => {
     });
 });
 
-describe('isDirectChannel', () => {
+describe('isEligibleChannel', () => {
     it('returns null while the channel entity is not loaded', () => {
-        expect(isDirectChannel(makeState(), 'missing')).toBeNull();
+        expect(isEligibleChannel(makeState(), 'missing')).toBeNull();
     });
 
     it('detects DM and non-DM channels', () => {
-        expect(isDirectChannel(makeState(), 'dm1')).toBe(true);
-        expect(isDirectChannel(makeState(), 'town')).toBe(false);
+        expect(isEligibleChannel(makeState(), 'dm1')).toBe(true);
+        expect(isEligibleChannel(makeState(), 'town')).toBe(true);
     });
 });
 
