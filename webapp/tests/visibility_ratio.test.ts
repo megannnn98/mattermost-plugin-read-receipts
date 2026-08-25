@@ -1,6 +1,7 @@
 import {
     isSufficientlyVisible,
     resolveObservedElement,
+    resolveScrollRoot,
     VISIBILITY_THRESHOLD,
 } from '../src/visibility_ratio';
 
@@ -77,5 +78,73 @@ describe('resolveObservedElement', () => {
     it('returns the sentinel itself when it has no parent', () => {
         const sentinel = makeSentinel();
         expect(resolveObservedElement(sentinel)).toBe(sentinel);
+    });
+});
+
+describe('resolveScrollRoot', () => {
+    const scrollable = (overflowY: string, scrollHeight: number, clientHeight: number) => {
+        const el = document.createElement('div');
+        el.style.overflowY = overflowY;
+        Object.defineProperty(el, 'scrollHeight', {value: scrollHeight, configurable: true});
+        Object.defineProperty(el, 'clientHeight', {value: clientHeight, configurable: true});
+        return el;
+    };
+
+    it('finds the nearest scrolling ancestor', () => {
+        const list = scrollable('auto', 5000, 492);
+        const post = document.createElement('div');
+        list.appendChild(post);
+        document.body.appendChild(list);
+
+        expect(resolveScrollRoot(post)).toBe(list);
+        document.body.removeChild(list);
+    });
+
+    it('skips ancestors that do not actually scroll', () => {
+        const outer = scrollable('auto', 5000, 492);
+        const inner = scrollable('auto', 100, 100);
+        outer.appendChild(inner);
+        const post = document.createElement('div');
+        inner.appendChild(post);
+        document.body.appendChild(outer);
+
+        expect(resolveScrollRoot(post)).toBe(outer);
+        document.body.removeChild(outer);
+    });
+
+    it('returns null when nothing scrolls, keeping the viewport as the root', () => {
+        const plain = document.createElement('div');
+        const post = document.createElement('div');
+        plain.appendChild(post);
+        document.body.appendChild(plain);
+
+        expect(resolveScrollRoot(post)).toBeNull();
+        document.body.removeChild(plain);
+    });
+});
+
+// Geometry measured in a live Mattermost Desktop 6.3.0 window: an 8063px post in
+// a 492px post list inside a 760px window. The visible slice can never exceed the
+// list height, so measuring the tall-post branch against the window made it
+// unreachable and such a post was never reported as read at all.
+describe('tall post in the real Mattermost layout', () => {
+    const WINDOW_H = 760;
+    const LIST_H = 492;
+    const POST_H = 8063;
+    const VISIBLE = 487;
+    const entry = (rootHeight: number) => ({
+        intersectionRatio: VISIBLE / POST_H,
+        intersectionRect: {height: VISIBLE},
+        rootBounds: {height: rootHeight},
+    });
+
+    it('is unreachable when measured against the window', () => {
+        expect(VISIBLE).toBeLessThan(WINDOW_H * VISIBILITY_THRESHOLD);
+        expect(isSufficientlyVisible(entry(WINDOW_H), VISIBILITY_THRESHOLD)).toBe(false);
+    });
+
+    it('is satisfied when measured against the post list, which is the observer root', () => {
+        expect(isSufficientlyVisible(entry(LIST_H), VISIBILITY_THRESHOLD)).toBe(true);
+        expect(VISIBLE / POST_H).toBeLessThan(VISIBILITY_THRESHOLD);
     });
 });

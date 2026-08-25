@@ -48,9 +48,11 @@ class MockIntersectionObserver {
     static callback: ((entries: IOEntry[]) => void) | null = null;
     static observed: Element[] = [];
     static threshold: number[] | null = null;
+    static root: Element | Document | null | undefined = undefined;
     constructor(callback: (entries: IOEntry[]) => void, options?: IntersectionObserverInit) {
         MockIntersectionObserver.callback = callback;
         MockIntersectionObserver.threshold = options?.threshold as number[];
+        MockIntersectionObserver.root = options?.root;
     }
     observe(el: Element) {
         MockIntersectionObserver.observed.push(el);
@@ -122,6 +124,7 @@ describe('ReadReceipt component', () => {
         MockIntersectionObserver.callback = null;
         MockIntersectionObserver.observed = [];
         MockIntersectionObserver.threshold = null;
+        MockIntersectionObserver.root = undefined;
         (sendReadReceipt as jest.Mock).mockReset();
         (sendReadReceipt as jest.Mock).mockResolvedValue(true);
         (getVisibilityTracker() as any)._set({isVisible: true, isFocused: true, isIdle: false});
@@ -320,6 +323,30 @@ describe('ReadReceipt component', () => {
         fireIntersecting(true);
         act(() => jest.advanceTimersByTime(1500));
         expect(sendReadReceipt).toHaveBeenCalledWith('channel1', 'p1', 1000);
+    });
+
+    // Thresholds are relative to the observer root. Mattermost's post list is only
+    // ~65% of the window (492px of 760px, measured in a live Desktop window), so a
+    // window-relative root makes the tall-post branch unreachable and a tall post is
+    // never reported as read at all. The root must be the scrolling post list.
+    it('observes against the scrolling post list, not the window', () => {
+        const list = document.createElement('div');
+        list.style.overflowY = 'auto';
+        Object.defineProperty(list, 'scrollHeight', {value: 5000, configurable: true});
+        Object.defineProperty(list, 'clientHeight', {value: 492, configurable: true});
+        const post = document.createElement('div');
+        post.className = 'post';
+        list.appendChild(post);
+        document.body.appendChild(list);
+
+        const localRoot = createRoot(post);
+        act(() => localRoot.render(<ReadReceipt postId="p1"/>));
+
+        expect(MockIntersectionObserver.root).toBe(list);
+        expect(MockIntersectionObserver.observed[0]).toBe(post);
+
+        act(() => localRoot.unmount());
+        document.body.removeChild(list);
     });
 
     it('aborts a scheduled retry when the window blurs during the backoff', async () => {

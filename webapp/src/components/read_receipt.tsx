@@ -11,6 +11,7 @@ import {GlobalState} from '../types';
 import {
     isSufficientlyVisible,
     resolveObservedElement,
+    resolveScrollRoot,
     VISIBILITY_THRESHOLD,
     VISIBILITY_THRESHOLDS,
 } from '../visibility_ratio';
@@ -146,6 +147,13 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
             }, DWELL_MS);
         };
 
+        // Resolve the observed element and its scrolling root before creating the
+        // observer: thresholds are relative to the root, and Mattermost's post
+        // list is only ~65% of the window, so measuring against the window makes
+        // the tall-post branch unreachable.
+        const observed = sentinelRef.current ? resolveObservedElement(sentinelRef.current) : null;
+        const observedRoot = observed ? resolveScrollRoot(observed) : null;
+
         const observer = new IntersectionObserver((entries) => {
             for (const entry of entries) {
                 const visible = isSufficientlyVisible(entry, VISIBILITY_THRESHOLD);
@@ -163,10 +171,10 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
                     startDwell();
                 }
             }
-        }, {threshold: VISIBILITY_THRESHOLDS});
+        }, {threshold: VISIBILITY_THRESHOLDS, root: observedRoot});
 
-        if (sentinelRef.current) {
-            observer.observe(resolveObservedElement(sentinelRef.current));
+        if (observed) {
+            observer.observe(observed);
         }
 
         const onVisibilityChange = (visibility: VisibilityState) => {
