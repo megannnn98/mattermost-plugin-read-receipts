@@ -8,6 +8,13 @@
 
 ## BRIEF (копировать целиком)
 
+### Ловушка React runtime
+
+Проверка webapp в jsdom должна подставлять реальный React 17.0.2, который
+Mattermost 9.5+ предоставляет плагинам через `window.React`. jsdom с React 18 из
+`node_modules` маскирует зависимость от React 18 API; именно так прежняя проверка
+не обнаружила несовместимость `useSyncExternalStore`.
+
 ### Задача
 
 Проверить на живом Mattermost-сервере плагин read receipts, найти и исправить дефекты, которые
