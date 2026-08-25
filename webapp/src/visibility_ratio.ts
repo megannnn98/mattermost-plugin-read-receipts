@@ -14,7 +14,7 @@ export interface IntersectionObserverEntryLike {
 }
 
 /**
- * The component observes a 1x1 sentinel span. A post taller than the viewport
+ * The component renders a zero-sized sentinel span. A post taller than the viewport
  * can never reach a 0.75 intersection ratio, and the sentinel alone does not
  * represent the visible area, so resolve to the nearest real post element when
  * possible: .post > .post__body > the sentinel's parent > the sentinel itself.

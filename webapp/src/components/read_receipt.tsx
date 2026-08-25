@@ -190,7 +190,11 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
             clearDwell();
             clearRetry();
         };
-    }, [postId, store]);
+        // `isDM` is a dependency on purpose: while the channel entity is not in
+        // the store yet the component renders nothing, so there is no sentinel
+        // for the observer to attach to. Re-running the effect once isDM flips
+        // to true is what actually binds the observer to the mounted sentinel.
+    }, [postId, store, isDM]);
 
     if (!isDM) {
         return null;

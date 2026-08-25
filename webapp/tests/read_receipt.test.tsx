@@ -46,10 +46,13 @@ type IOEntry = {
 
 class MockIntersectionObserver {
     static callback: ((entries: IOEntry[]) => void) | null = null;
+    static observed: Element[] = [];
     constructor(callback: (entries: IOEntry[]) => void) {
         MockIntersectionObserver.callback = callback;
     }
-    observe(_el: Element) {}
+    observe(el: Element) {
+        MockIntersectionObserver.observed.push(el);
+    }
     disconnect() {}
     unobserve() {}
 }
@@ -114,6 +117,7 @@ describe('ReadReceipt component', () => {
         jest.useFakeTimers();
         (window as any).IntersectionObserver = MockIntersectionObserver;
         MockIntersectionObserver.callback = null;
+        MockIntersectionObserver.observed = [];
         (sendReadReceipt as jest.Mock).mockClear();
         (sendReadReceipt as jest.Mock).mockResolvedValue(true);
         setStore(makeStore());
@@ -238,6 +242,52 @@ describe('ReadReceipt component', () => {
         fireIntersecting(true);
         act(() => jest.advanceTimersByTime(1500));
         expect(mSend).toHaveBeenCalledTimes(2);
+    });
+
+    // The channel entity can land in the store after the post component has
+    // already mounted (a cold channel switch). While it is missing the component
+    // renders nothing, so there is no sentinel to observe; the effect must run
+    // again once the channel becomes known, otherwise the post is never tracked
+    // and its read receipt is never sent.
+    it('attaches the observer when the channel entity arrives after mount', () => {
+        const listeners: Array<() => void> = [];
+        const withoutChannel: any = {
+            entities: {
+                users: {currentUserId: 'me'},
+                channels: {currentChannelId: 'channel1', channels: {}},
+                posts: {posts: {p1: {id: 'p1', user_id: 'other', channel_id: 'channel1', create_at: 1000}}},
+            },
+        };
+        let current = withoutChannel;
+        setStore({
+            getState: () => current,
+            dispatch: jest.fn(),
+            subscribe: (cb: () => void) => {
+                listeners.push(cb);
+                return () => undefined;
+            },
+        } as any);
+
+        act(() => root.render(<ReadReceipt postId="p1"/>));
+        expect(MockIntersectionObserver.observed).toHaveLength(0);
+
+        // The channel entity arrives; Redux notifies with a fresh state object.
+        current = {
+            ...withoutChannel,
+            entities: {
+                ...withoutChannel.entities,
+                channels: {currentChannelId: 'channel1', channels: {channel1: {id: 'channel1', type: 'D'}}},
+            },
+        };
+        act(() => listeners.forEach((cb) => cb()));
+
+        expect(container.querySelectorAll('span')).toHaveLength(1);
+        expect(MockIntersectionObserver.observed.length).toBeGreaterThan(0);
+
+        // And the post is now actually tracked end to end.
+        fireIntersecting(true);
+        act(() => jest.advanceTimersByTime(1500));
+        expect(sendReadReceipt).toHaveBeenCalledWith('channel1', 'p1', 1000);
     });
 
     it('aborts a scheduled retry when the window blurs during the backoff', async () => {
