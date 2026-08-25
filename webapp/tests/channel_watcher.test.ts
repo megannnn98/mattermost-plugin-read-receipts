@@ -1,4 +1,5 @@
-import {collectOwnPostIds, isDirectChannel, startChannelWatcher} from '../src/channel_watcher';
+import {collectOwnPostIds, isDirectChannel, RETRY_BASE_MS, startChannelWatcher} from '../src/channel_watcher';
+import * as actions from '../src/actions';
 import {ACTION_TYPES} from '../src/reducer';
 import * as client from '../src/client';
 
@@ -40,6 +41,10 @@ function makeState() {
 }
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+const flushMicrotasks = async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+};
 
 function makeStore(state: any) {
     const listeners: Array<() => void> = [];
@@ -294,5 +299,118 @@ describe('startChannelWatcher', () => {
 
         watcher.stop();
         expect(store.listenerCount()).toBe(0);
+    });
+
+    it('retries a failed query after backoff and only handles the channel on success', async () => {
+        jest.useFakeTimers();
+        const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        mockedFetch.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce({watermark: null, receipts: {}});
+        const store = makeStore(makeState());
+        const watcher = startChannelWatcher(store);
+
+        await flushMicrotasks();
+        expect(mockedFetch).toHaveBeenCalledTimes(1);
+        expect(store.dispatch).not.toHaveBeenCalled();
+
+        jest.advanceTimersByTime(5000);
+        await flushMicrotasks();
+        expect(mockedFetch).toHaveBeenCalledTimes(2);
+        expect(store.dispatch).toHaveBeenCalledWith(expect.objectContaining({type: ACTION_TYPES.RECEIPTS_QUERY}));
+
+        watcher.stop();
+        error.mockRestore();
+        jest.useRealTimers();
+    });
+
+    it('increases failure backoff instead of retrying on every store tick', async () => {
+        jest.useFakeTimers();
+        const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        mockedFetch.mockRejectedValue(new Error('offline'));
+        const store = makeStore(makeState());
+        const watcher = startChannelWatcher(store);
+
+        await flushMicrotasks();
+        store.notify();
+        store.notify();
+        expect(mockedFetch).toHaveBeenCalledTimes(1);
+
+        jest.advanceTimersByTime(4999);
+        await flushMicrotasks();
+        expect(mockedFetch).toHaveBeenCalledTimes(1);
+        jest.advanceTimersByTime(1);
+        await flushMicrotasks();
+        expect(mockedFetch).toHaveBeenCalledTimes(2);
+
+        jest.advanceTimersByTime(9999);
+        await flushMicrotasks();
+        expect(mockedFetch).toHaveBeenCalledTimes(2);
+        watcher.stop();
+        error.mockRestore();
+        jest.useRealTimers();
+    });
+
+    it('refresh() retries immediately instead of sitting out the backoff', async () => {
+        jest.useFakeTimers();
+        const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        mockedFetch.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce({watermark: null, receipts: {}});
+        const store = makeStore(makeState());
+        const watcher = startChannelWatcher(store);
+
+        await flushMicrotasks();
+        expect(mockedFetch).toHaveBeenCalledTimes(1);
+
+        // A websocket reconnect is exactly the event the backed-off channel was
+        // waiting for; it must not wait out the remaining backoff.
+        watcher.refresh();
+        await flushMicrotasks();
+        expect(mockedFetch).toHaveBeenCalledTimes(2);
+        expect(store.dispatch).toHaveBeenCalledWith(
+            expect.objectContaining({type: ACTION_TYPES.RECEIPTS_QUERY}),
+        );
+
+        watcher.stop();
+        error.mockRestore();
+        jest.useRealTimers();
+    });
+
+    it('survives a loader that rejects instead of resolving false', async () => {
+        jest.useFakeTimers();
+        const loader = jest.spyOn(actions, 'loadChannelReceipts');
+        loader.mockRejectedValueOnce(new Error('boom'));
+        mockedFetch.mockResolvedValue({watermark: null, receipts: {}});
+        const store = makeStore(makeState());
+        const watcher = startChannelWatcher(store);
+
+        await flushMicrotasks();
+        expect(loader).toHaveBeenCalledTimes(1);
+
+        // A dropped rejection would leave inFlightChannelId set and wedge the
+        // watcher forever: the backoff retry proves it is still alive.
+        loader.mockRestore();
+        jest.advanceTimersByTime(RETRY_BASE_MS);
+        await flushMicrotasks();
+        expect(mockedFetch).toHaveBeenCalledTimes(1);
+        expect(store.dispatch).toHaveBeenCalledWith(
+            expect.objectContaining({type: ACTION_TYPES.RECEIPTS_QUERY}),
+        );
+
+        watcher.stop();
+        jest.useRealTimers();
+    });
+
+    it('stop() cancels a scheduled failed-query retry', async () => {
+        jest.useFakeTimers();
+        const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        mockedFetch.mockRejectedValue(new Error('offline'));
+        const watcher = startChannelWatcher(makeStore(makeState()));
+
+        await flushMicrotasks();
+        watcher.stop();
+        jest.advanceTimersByTime(60000);
+        await flushMicrotasks();
+        expect(mockedFetch).toHaveBeenCalledTimes(1);
+
+        error.mockRestore();
+        jest.useRealTimers();
     });
 });

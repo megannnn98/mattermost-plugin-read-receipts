@@ -2,6 +2,8 @@ import {loadChannelReceipts} from './actions';
 import {GlobalState, PluginStore} from './types';
 
 export const MAX_QUERY_IDS = 200;
+export const RETRY_BASE_MS = 5000;
+export const RETRY_MAX_MS = 60000;
 
 export function isDirectChannel(state: GlobalState, channelId: string): boolean | null {
     const channel = state?.entities?.channels?.channels?.[channelId];
@@ -62,15 +64,35 @@ export function startChannelWatcher(store: PluginStore): ChannelWatcher {
     let handledChannelId: string | null = null;
     let inFlightChannelId: string | null = null;
     let refreshRequested = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let retryChannelId: string | null = null;
+    let failures = 0;
+    let stopped = false;
+
+    const clearRetry = () => {
+        if (retryTimer) {
+            clearTimeout(retryTimer);
+            retryTimer = null;
+        }
+        retryChannelId = null;
+    };
 
     const check = () => {
+        if (stopped) {
+            return;
+        }
         const state = store.getState();
         const channelId = state?.entities?.channels?.currentChannelId;
+
+        if (retryTimer && retryChannelId !== channelId) {
+            clearRetry();
+            failures = 0;
+        }
 
         // No channel yet, already handled, or a query is mid-flight. In the
         // in-flight case `done()` re-runs check unconditionally, so a channel
         // switch that happened while the query was pending is picked up then.
-        if (!channelId || channelId === handledChannelId || inFlightChannelId !== null) {
+        if (!channelId || channelId === handledChannelId || inFlightChannelId !== null || retryTimer !== null) {
             return;
         }
 
@@ -91,10 +113,26 @@ export function startChannelWatcher(store: PluginStore): ChannelWatcher {
         }
 
         inFlightChannelId = channelId;
-        const done = () => {
+        const done = (ok: boolean) => {
             inFlightChannelId = null;
-            if (!refreshRequested) {
+            if (stopped) {
+                return;
+            }
+            if (ok && !refreshRequested) {
                 handledChannelId = channelId;
+            }
+            if (ok) {
+                failures = 0;
+                clearRetry();
+            } else {
+                failures += 1;
+                retryChannelId = channelId;
+                const delay = Math.min(RETRY_BASE_MS * 2 ** (failures - 1), RETRY_MAX_MS);
+                retryTimer = setTimeout(() => {
+                    retryTimer = null;
+                    retryChannelId = null;
+                    check();
+                }, delay);
             }
             refreshRequested = false;
             // Unconditional re-check: if the user switched to another channel
@@ -102,14 +140,21 @@ export function startChannelWatcher(store: PluginStore): ChannelWatcher {
             // switch would be lost and channel B might never load.
             check();
         };
-        loadChannelReceipts(store, channelId, postIds).then(done, done);
+        // The second handler matters: loadChannelReceipts swallows request errors
+        // today, but if it ever rejects, dropping the rejection would leave
+        // inFlightChannelId set forever and the watcher permanently dead.
+        loadChannelReceipts(store, channelId, postIds).then(done, () => done(false));
     };
 
     const unsubscribe = store.subscribe(check);
     check();
 
     return {
-        stop: () => unsubscribe(),
+        stop: () => {
+            stopped = true;
+            clearRetry();
+            unsubscribe();
+        },
         refresh: () => {
             // If a query is in flight, mark that the current channel must be
             // reloaded once it finishes (its done() re-checks unconditionally).
@@ -118,6 +163,10 @@ export function startChannelWatcher(store: PluginStore): ChannelWatcher {
             if (inFlightChannelId !== null) {
                 refreshRequested = true;
             }
+            // A reconnect is exactly the event a backed-off channel was waiting
+            // for: drop the pending backoff instead of sitting it out.
+            clearRetry();
+            failures = 0;
             handledChannelId = null;
             check();
         },

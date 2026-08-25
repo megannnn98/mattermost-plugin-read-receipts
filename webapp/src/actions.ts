@@ -60,9 +60,9 @@ export async function loadChannelReceipts(
     store: PluginStore,
     channelId: string,
     postIds: string[],
-): Promise<void> {
+): Promise<boolean> {
     if (postIds.length === 0) {
-        return;
+        return false;
     }
 
     try {
@@ -75,8 +75,10 @@ export async function loadChannelReceipts(
                 receipts: response.receipts,
             },
         });
+        return true;
     } catch (error) {
         console.error(`[${PLUGIN_ID}] Failed to load receipts:`, error);
+        return false;
     }
 }
 
