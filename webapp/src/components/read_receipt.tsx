@@ -299,7 +299,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         // the store yet the component renders nothing, so there is no sentinel
         // for the observer to attach to. Re-running the effect once eligibility flips
         // to true is what actually binds the observer to the mounted sentinel.
-    }, [postId, store, eligible]);
+    }, [postId, store, eligible, isOwn]);
 
     const state = store?.getState();
     const cachedReaders = state ? selectPostReaders(state, postId) : undefined;

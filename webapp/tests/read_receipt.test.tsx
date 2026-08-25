@@ -49,6 +49,7 @@ type IOEntry = {
 class MockIntersectionObserver {
     static callback: ((entries: IOEntry[]) => void) | null = null;
     static observed: Element[] = [];
+    static disconnect = jest.fn();
     static threshold: number[] | null = null;
     static root: Element | Document | null | undefined = undefined;
     constructor(callback: (entries: IOEntry[]) => void, options?: IntersectionObserverInit) {
@@ -59,7 +60,9 @@ class MockIntersectionObserver {
     observe(el: Element) {
         MockIntersectionObserver.observed.push(el);
     }
-    disconnect() {}
+    disconnect() {
+        MockIntersectionObserver.disconnect();
+    }
     unobserve() {}
 }
 
@@ -108,6 +111,30 @@ function makeStore() {
     };
 }
 
+function makeReactiveStore(initialState: ReturnType<typeof makeState>) {
+    let state = initialState;
+    const listeners = new Set<() => void>();
+
+    return {
+        getState: () => state,
+        dispatch: jest.fn(),
+        subscribe: (listener: () => void) => {
+            listeners.add(listener);
+            return () => listeners.delete(listener);
+        },
+        setCurrentUserId: (currentUserId: string) => {
+            state = {
+                ...state,
+                entities: {
+                    ...state.entities,
+                    users: {currentUserId},
+                },
+            };
+            listeners.forEach((listener) => listener());
+        },
+    };
+}
+
 function fireIntersecting(visible: boolean) {
     MockIntersectionObserver.callback?.([entryFor(visible)]);
 }
@@ -126,6 +153,7 @@ describe('ReadReceipt component', () => {
         (window as any).IntersectionObserver = MockIntersectionObserver;
         MockIntersectionObserver.callback = null;
         MockIntersectionObserver.observed = [];
+        MockIntersectionObserver.disconnect.mockClear();
         MockIntersectionObserver.threshold = null;
         MockIntersectionObserver.root = undefined;
         (sendReadReceipt as jest.Mock).mockReset();
@@ -160,6 +188,43 @@ describe('ReadReceipt component', () => {
         act(() => jest.advanceTimersByTime(1500));
 
         expect(sendReadReceipt).not.toHaveBeenCalled();
+    });
+
+    it('cancels an observer when late identity makes the post our own', () => {
+        const state = makeState();
+        delete (state.entities.users as {currentUserId?: string}).currentUserId;
+        state.entities.posts.posts.p1.user_id = 'me';
+        const store = makeReactiveStore(state);
+        setStore(store as never);
+
+        act(() => root.render(<ReadReceipt postId="p1"/>));
+        fireIntersecting(true);
+        expect(MockIntersectionObserver.disconnect).not.toHaveBeenCalled();
+
+        // The prior effect was allowed to observe while identity was unknown.
+        // Once it becomes ours, its cleanup must cancel that dwell before it can
+        // report a receipt for our own post.
+        act(() => store.setCurrentUserId('me'));
+        expect(MockIntersectionObserver.disconnect).toHaveBeenCalledTimes(1);
+        act(() => jest.advanceTimersByTime(1500));
+        expect(sendReadReceipt).not.toHaveBeenCalled();
+
+        act(() => root.unmount());
+        expect(jest.getTimerCount()).toBe(0);
+    });
+
+    it('still reports an incoming post after late identity arrives', () => {
+        const state = makeState();
+        delete (state.entities.users as {currentUserId?: string}).currentUserId;
+        const store = makeReactiveStore(state);
+        setStore(store as never);
+
+        act(() => root.render(<ReadReceipt postId="p1"/>));
+        act(() => store.setCurrentUserId('me'));
+        fireIntersecting(true);
+        act(() => jest.advanceTimersByTime(1500));
+
+        expect(sendReadReceipt).toHaveBeenCalledWith('channel1', 'p1', 1000);
     });
 
     it('starts the dwell again when focus returns while the post is still visible', () => {
