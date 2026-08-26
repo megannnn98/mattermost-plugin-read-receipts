@@ -44,7 +44,7 @@ make test     # только тесты
 make dist     # только сборка dist/*.tar.gz
 ```
 
-Результат: `dist/com.integrasources.read-receipts-0.2.2.tar.gz`
+Результат: `dist/com.integrasources.read-receipts-0.2.3.tar.gz`
 
 Зависимости webapp ставятся воспроизводимо через `npm ci` (по lock-файлу). Для
 обновления зависимостей и перегенерации lock-файла — `make node-deps-update`
@@ -53,7 +53,7 @@ make dist     # только сборка dist/*.tar.gz
 
 ## Install
 
-1. Скачайте `dist/com.integrasources.read-receipts-0.2.2.tar.gz`
+1. Скачайте `dist/com.integrasources.read-receipts-0.2.3.tar.gz`
 2. Откройте **System Console → Plugins → Upload**
 3. Загрузите `.tar.gz`
 4. Включите плагин: **System Console → Plugins → Read Receipts → Enable**
@@ -64,7 +64,7 @@ make dist     # только сборка dist/*.tar.gz
 Или через `mmctl`:
 
 ```bash
-mmctl plugin add dist/com.integrasources.read-receipts-0.2.2.tar.gz
+mmctl plugin add dist/com.integrasources.read-receipts-0.2.3.tar.gz
 mmctl plugins enable com.integrasources.read-receipts
 ```
 
