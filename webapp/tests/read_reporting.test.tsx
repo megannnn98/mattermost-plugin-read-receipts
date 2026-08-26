@@ -430,3 +430,213 @@ describe('cost of the portal post-id collection', () => {
         expect(ownKeysCalls).toBe(afterWarmup);
     });
 });
+
+// Tests covering the review findings: channel scoping, late DOM, null user,
+// and multi-DM resource boundedness.
+describe('channel scoping and late DOM', () => {
+    let container: HTMLDivElement;
+    let root: ReturnType<typeof createRoot>;
+
+    beforeEach(() => {
+        jest.useFakeTimers();
+        (window as any).IntersectionObserver = MockIntersectionObserver;
+        MockIntersectionObserver.callbacks = [];
+        MockIntersectionObserver.observed = [];
+        MockIntersectionObserver.disconnectCount = 0;
+        (sendReadReceipt as jest.Mock).mockClear();
+        (sendReadReceipt as jest.Mock).mockResolvedValue(true);
+        document.body.innerHTML = '';
+        container = document.createElement('div');
+        document.body.appendChild(container);
+        root = createRoot(container);
+    });
+
+    afterEach(() => {
+        act(() => root.unmount());
+        setStore(null);
+        document.body.innerHTML = '';
+        jest.useRealTimers();
+    });
+
+    // HIGH-1 / MEDIUM-1: only posts in the current DM get observers.
+    // Incoming posts in other DMs must not mount (no observers, no timers).
+    it('mounts observers only for posts in the current DM, not for other DMs', () => {
+        const listeners: Array<() => void> = [];
+        const state: any = {
+            entities: {
+                users: {currentUserId: 'me', profiles: {}},
+                channels: {
+                    currentChannelId: 'dm1',
+                    channels: {
+                        dm1: {id: 'dm1', type: 'D'},
+                        dm2: {id: 'dm2', type: 'D'},
+                    },
+                },
+                posts: {
+                    posts: {
+                        theirs: {id: 'theirs', user_id: 'other', channel_id: 'dm1', create_at: 1000},
+                        theirsInDm2: {id: 'theirsInDm2', user_id: 'other', channel_id: 'dm2', create_at: 2000},
+                    },
+                },
+            },
+            'plugins-com.integrasources.read-receipts': {watermarks: {}, receipts: {}},
+        };
+        setStore({
+            getState: () => state,
+            dispatch: jest.fn(),
+            subscribe: (listener: () => void) => {
+                listeners.push(listener);
+                return () => listeners.splice(listeners.indexOf(listener), 1);
+            },
+        } as never);
+
+        renderPost('theirs');
+        renderPost('theirsInDm2');
+
+        act(() => root.render(<ReadReceiptPortals/>));
+
+        // Observer only for the post in the current channel.
+        const theirPost = document.getElementById('post_theirs');
+        const theirsInDm2Post = document.getElementById('post_theirsInDm2');
+        expect(MockIntersectionObserver.observed).toContain(theirPost);
+        expect(MockIntersectionObserver.observed).not.toContain(theirsInDm2Post);
+    });
+
+    // HIGH-1: channel switch away drops observers, switch back recreates them.
+    it('recreates the observer when the user switches back to the channel', () => {
+        const listeners: Array<() => void> = [];
+        const state: any = {
+            entities: {
+                users: {currentUserId: 'me', profiles: {}},
+                channels: {
+                    currentChannelId: 'dm1',
+                    channels: {
+                        dm1: {id: 'dm1', type: 'D'},
+                        dm2: {id: 'dm2', type: 'D'},
+                    },
+                },
+                posts: {
+                    posts: {
+                        theirs: {id: 'theirs', user_id: 'other', channel_id: 'dm1', create_at: 1000},
+                    },
+                },
+            },
+            'plugins-com.integrasources.read-receipts': {watermarks: {}, receipts: {}},
+        };
+        setStore({
+            getState: () => state,
+            dispatch: jest.fn(),
+            subscribe: (listener: () => void) => {
+                listeners.push(listener);
+                return () => listeners.splice(listeners.indexOf(listener), 1);
+            },
+        } as never);
+
+        renderPost('theirs');
+        act(() => root.render(<ReadReceiptPortals/>));
+        expect(MockIntersectionObserver.observed).toContain(document.getElementById('post_theirs'));
+        MockIntersectionObserver.callbacks.length = 0;
+
+        // Switch away — observer disconnects, no callbacks remain.
+        act(() => {
+            state.entities.channels = {
+                ...state.entities.channels,
+                currentChannelId: 'dm2',
+            };
+            listeners.forEach((l) => l());
+        });
+        expect(MockIntersectionObserver.callbacks.length).toBe(0);
+
+        // Switch back — fresh observer on the same (reused) DOM element.
+        act(() => {
+            state.entities.channels = {
+                ...state.entities.channels,
+                currentChannelId: 'dm1',
+            };
+            listeners.forEach((l) => l());
+        });
+        // Flush React's batched store-subscription update.
+        act(() => {});
+        // The observer must be re-created for the post in the current channel.
+        expect(MockIntersectionObserver.observed).toContain(document.getElementById('post_theirs'));
+        expect(MockIntersectionObserver.callbacks.length).toBe(1);
+
+        // And a receipt is produced for the post.
+        MockIntersectionObserver.callbacks.forEach((cb) => cb([VISIBLE]));
+        act(() => jest.advanceTimersByTime(1500));
+        expect(sendReadReceipt).toHaveBeenCalledWith('dm1', 'theirs', 1000);
+    });
+
+    // HIGH-1: post element appears after the attach-retry window.
+    // The portal key flips from '...-0' to '...-1' when the element appears,
+    // remounting ReadReceipt which then finds the element on the first try.
+    it('recreates the component when the post element appears after retries', () => {
+        const listeners: Array<() => void> = [];
+        const state: any = {
+            entities: {
+                users: {currentUserId: 'me', profiles: {}},
+                channels: {currentChannelId: 'dm1', channels: {dm1: {id: 'dm1', type: 'D'}}},
+                posts: {posts: {theirs: {id: 'theirs', user_id: 'other', channel_id: 'dm1', create_at: 1000}}},
+            },
+            'plugins-com.integrasources.read-receipts': {watermarks: {}, receipts: {}},
+        };
+        setStore({
+            getState: () => state,
+            dispatch: jest.fn(),
+            subscribe: (listener: () => void) => {
+                listeners.push(listener);
+                return () => listeners.splice(listeners.indexOf(listener), 1);
+            },
+        } as never);
+
+        // Render without the post element — attach retry starts.
+        act(() => root.render(<ReadReceiptPortals/>));
+        expect(MockIntersectionObserver.observed).toHaveLength(0);
+
+        // Exhaust all retries (100 + 300 + 1000 + 3000 = 4400ms).
+        act(() => jest.advanceTimersByTime(5000));
+        expect(jest.getTimerCount()).toBe(0);
+        expect(MockIntersectionObserver.observed).toHaveLength(0);
+
+        // Now the element appears and a store notification flips the key.
+        renderPost('theirs');
+        act(() => {
+            // Force cache invalidation by mutating the posts reference.
+            state.entities.posts.posts = {...state.entities.posts.posts};
+            listeners.forEach((l) => l());
+        });
+
+        // A fresh component mounts with the element present — observer attached.
+        expect(MockIntersectionObserver.observed).toContain(document.getElementById('post_theirs'));
+
+        MockIntersectionObserver.callbacks.forEach((cb) => cb([VISIBLE]));
+        act(() => jest.advanceTimersByTime(1500));
+        expect(sendReadReceipt).toHaveBeenCalledWith('dm1', 'theirs', 1000);
+    });
+
+    // LOW-1: no user id yet — nothing mounts, no observers, no receipts.
+    it('mounts nothing when the current user id is not yet known', () => {
+        const state: any = {
+            entities: {
+                users: {currentUserId: undefined, profiles: {}},
+                channels: {currentChannelId: 'dm1', channels: {dm1: {id: 'dm1', type: 'D'}}},
+                posts: {posts: {theirs: {id: 'theirs', user_id: 'other', channel_id: 'dm1', create_at: 1000}}},
+            },
+            'plugins-com.integrasources.read-receipts': {watermarks: {}, receipts: {}},
+        };
+        setStore({
+            getState: () => state,
+            dispatch: jest.fn(),
+            subscribe: jest.fn().mockReturnValue(() => undefined),
+        } as never);
+
+        renderPost('theirs');
+        act(() => root.render(<ReadReceiptPortals/>));
+
+        expect(MockIntersectionObserver.observed).toHaveLength(0);
+
+        MockIntersectionObserver.callbacks.forEach((cb) => cb([VISIBLE]));
+        act(() => jest.advanceTimersByTime(1500));
+        expect(sendReadReceipt).not.toHaveBeenCalled();
+    });
+});

@@ -8,19 +8,28 @@ const PORTAL_RETRY_MS = [250, 1000, 3000, 5000];
 
 const portalHosts = new Map<string, HTMLElement>();
 
-// Cached own/incoming DM post id lists. Both are rebuilt in one pass when any
-// of the cache keys change — posts, channels, or the current user. Returning
-// the cached array by reference is safe because every consumer only reads it
-// (syncPortalHosts, cleanupStaleHosts, some, map).
+// Cached own/incoming DM post id lists for the current channel. Both are
+// rebuilt in one pass when any of the cache keys change — posts, channels,
+// the current user, or the current channel. Returning the cached array by
+// reference is safe because every consumer only reads it (syncPortalHosts,
+// cleanupStaleHosts, some, map).
 //
-// A separate hasDmChanges check in the store subscription (checking whether the
-// changed posts are actually in DM channels) was considered and rejected: the
-// identity cache below already makes a noop notification two pointer
-// comparisons, and adding a second invalidation mechanism would be complexity
-// for a saving already solved.
+// Scoping to the current channel keeps the mounted component set bounded:
+// without it every incoming DM post ever seen would mount a ReadReceipt (and
+// up to four attach-retry timers each), even if the user is in a different
+// channel right now. Posts in other DMs get picked up on channel switch, when
+// the identity key changes and the cache rebuilds.
+//
+// A separate hasDmChanges check in the store subscription (checking whether
+// the changed posts are actually in DM channels) was considered and rejected:
+// the identity cache below makes noop notifications two pointer comparisons,
+// and a real change always costs one traversal regardless. hasDmChanges would
+// save that traversal only when the change is in a non-DM channel — real but
+// small, not worth the second invalidation mechanism.
 let cachedPostsRef: unknown = null;
 let cachedChannelsRef: unknown = null;
 let cachedUserId: string | null = null;
+let cachedCurrentChannelId: string | null = null;
 let cachedOwn: string[] = [];
 let cachedIncoming: string[] = [];
 
@@ -34,6 +43,7 @@ function collectDmPostIds(mine: boolean): string[] {
         cachedPostsRef = null;
         cachedChannelsRef = null;
         cachedUserId = null;
+        cachedCurrentChannelId = null;
         cachedOwn = [];
         cachedIncoming = [];
         return [];
@@ -43,14 +53,30 @@ function collectDmPostIds(mine: boolean): string[] {
     const posts = state?.entities?.posts?.posts ?? {};
     const channels = state?.entities?.channels?.channels ?? {};
     const userId = state?.entities?.users?.currentUserId ?? null;
+    const currentChannelId = state?.entities?.channels?.currentChannelId ?? null;
 
-    if (posts === cachedPostsRef && channels === cachedChannelsRef && userId === cachedUserId) {
+    // No user yet — do not classify posts as own or incoming. Without a user id
+    // every post would fall into the incoming bucket, mounting components (and
+    // their attach-retry timers) for posts whose ownership is unknown.
+    if (!userId) {
+        cachedPostsRef = null;
+        cachedChannelsRef = null;
+        cachedUserId = null;
+        cachedCurrentChannelId = null;
+        cachedOwn = [];
+        cachedIncoming = [];
+        return [];
+    }
+
+    if (posts === cachedPostsRef && channels === cachedChannelsRef &&
+        userId === cachedUserId && currentChannelId === cachedCurrentChannelId) {
         return mine ? cachedOwn : cachedIncoming;
     }
 
     cachedPostsRef = posts;
     cachedChannelsRef = channels;
     cachedUserId = userId;
+    cachedCurrentChannelId = currentChannelId;
 
     const own: string[] = [];
     const incoming: string[] = [];
@@ -60,6 +86,12 @@ function collectDmPostIds(mine: boolean): string[] {
         }
         const channel = channels[post.channel_id];
         if (channel?.type !== 'D') {
+            continue;
+        }
+        // Scope to the current channel only. Posts in other DMs are invisible
+        // to the plugin until the user switches to them; at that point the
+        // currentChannelId cache key changes and the cache rebuilds.
+        if (post.channel_id !== currentChannelId) {
             continue;
         }
         if (post.user_id === userId) {
@@ -160,28 +192,32 @@ const ReadReceiptPortals: React.FC = () => {
     // on scroll/resize, so a message that arrives later gets no component — and
     // for an incoming post that means no observer and no read reported at all.
     //
-    // The identity check keeps the cost to two pointer comparisons per store
-    // notification: Redux hands back the same `posts`/`channels` objects when
-    // nothing about them changed. A deeper check (did the changed posts actually
-    // land in a DM channel?) was considered and rejected — the memoized
-    // collectDmPostIds below already makes a re-render cheap, and adding a second
-    // invalidation mechanism would be complexity for a saving already solved.
+    // The identity check keeps noop notifications (nothing changed about posts
+    // or channels) to two pointer comparisons — Redux hands back the same
+    // `posts`/`channels` objects. A real change always costs one traversal in
+    // collectDmPostIds, regardless of whether the changed posts are in a DM
+    // channel. A deeper hasDmChanges check here was considered and rejected: it
+    // would save that traversal only when the change is in a non-DM channel,
+    // which is a small saving not worth a second invalidation mechanism.
     useEffect(() => {
         const store = getStore();
         if (!store) {
             return undefined;
         }
         let lastPosts: unknown = null;
-        let lastChannels: unknown = null;
+        // Track the whole `channels` slice (which contains both the channel map
+        // and currentChannelId) — checking only `channels.channels` would miss
+        // a channel switch, since that leaves the channel map reference intact.
+        let lastChannelsSlice: unknown = null;
         return store.subscribe(() => {
             const state = store.getState();
             const posts = state?.entities?.posts?.posts;
-            const channels = state?.entities?.channels?.channels;
-            if (posts === lastPosts && channels === lastChannels) {
+            const channelsSlice = state?.entities?.channels;
+            if (posts === lastPosts && channelsSlice === lastChannelsSlice) {
                 return;
             }
             lastPosts = posts;
-            lastChannels = channels;
+            lastChannelsSlice = channelsSlice;
             bumpRender();
         });
     }, []);
@@ -239,9 +275,20 @@ const ReadReceiptPortals: React.FC = () => {
                     host,
                 );
             })}
-            {incomingPostIds.map((postId) => (
-                <ReadReceipt key={`incoming-${postId}`} postId={postId} />
-            ))}
+            {incomingPostIds.map((postId) => {
+                // The key includes whether the post element is in the DOM right
+                // now. When it appears (virtualised list, slow render), the key
+                // flips and React unmounts the old component (whose attach
+                // retry may have given up) and mounts a fresh one that will
+                // find the element and attach the observer on the first try.
+                const hasElement = !!getPostElement(postId);
+                return (
+                    <ReadReceipt
+                        key={`incoming-${postId}-${hasElement ? '1' : '0'}`}
+                        postId={postId}
+                    />
+                );
+            })}
         </>
     );
 };

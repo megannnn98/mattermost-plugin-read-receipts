@@ -35,6 +35,14 @@ const isDMChannel = (state: GlobalState, postId: string): boolean => {
     return channel?.type === 'D';
 };
 
+const isCurrentChannel = (state: GlobalState, postId: string): boolean => {
+    const post = state?.entities?.posts?.posts?.[postId];
+    if (!post) {
+        return false;
+    }
+    return post.channel_id === state?.entities?.channels?.currentChannelId;
+};
+
 const selectReadAt = (state: GlobalState, postId: string): number | null => {
     const ctx = getPostContext(state, postId);
     if (!ctx || !ctx.isOwn) {
@@ -44,9 +52,9 @@ const selectReadAt = (state: GlobalState, postId: string): number | null => {
 };
 
 const isEqualDisplay = (
-    a: {isOwn: boolean; isDM: boolean; readAt: number | null},
-    b: {isOwn: boolean; isDM: boolean; readAt: number | null},
-): boolean => a.isOwn === b.isOwn && a.isDM === b.isDM && a.readAt === b.readAt;
+    a: {isOwn: boolean; isDM: boolean; isCurrent: boolean; readAt: number | null},
+    b: {isOwn: boolean; isDM: boolean; isCurrent: boolean; readAt: number | null},
+): boolean => a.isOwn === b.isOwn && a.isDM === b.isDM && a.isCurrent === b.isCurrent && a.readAt === b.readAt;
 
 function getPostElement(postId: string): HTMLElement | null {
     const host = document.querySelector(`.read-receipt-ticks-portal-host[data-post-id="${postId}"]`);
@@ -67,11 +75,12 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
     const [attachEpoch, setAttachEpoch] = useState(0);
     const store = getStore();
 
-    const {isOwn, isDM, readAt} = usePluginSelector(
+    const {isOwn, isDM, isCurrent, readAt} = usePluginSelector(
         store,
         (state) => ({
             isOwn: isOwnPost(state, postId),
             isDM: isDMChannel(state, postId),
+            isCurrent: isCurrentChannel(state, postId),
             readAt: selectReadAt(state, postId),
         }),
         isEqualDisplay,
@@ -91,7 +100,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
         const tracker = getVisibilityTracker();
 
         const initial = getPostContext(store.getState(), postId);
-        if (!initial || initial.isOwn || !initial.isDM) {
+        if (!initial || initial.isOwn || !initial.isDM || !initial.isCurrentChannel) {
             return;
         }
 
@@ -236,7 +245,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
             clearRetry();
             sufficientlyVisible = false;
         };
-    }, [postId, store, isDM, attachEpoch]);
+    }, [postId, store, isDM, isCurrent, attachEpoch]);
 
     if (!isOwn) {
         return null;
