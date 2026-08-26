@@ -180,7 +180,9 @@ export async function loadPluginConfig(store: PluginStore): Promise<boolean> {
         if (generation !== configRequestGeneration) {
             return false;
         }
-        console.error(`[${PLUGIN_ID}] Failed to load plugin configuration:`, error);
+        // Not console.error: at startup this is usually a race with the session
+        // that the caller retries out of. The loader reports the give-up.
+        console.debug(`[${PLUGIN_ID}] Failed to load plugin configuration:`, error);
         return false;
     }
 }
