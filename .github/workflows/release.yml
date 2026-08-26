@@ -5,6 +5,10 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.2.2)'
+        required: true
 
 permissions:
   contents: read
@@ -25,6 +29,7 @@ jobs:
           cache: npm
           cache-dependency-path: webapp/package-lock.json
       - name: Verify tag matches plugin version
+        if: github.event_name == 'push'
         run: |
           version="$(node -p "require('./plugin.json').version")"
           test "${GITHUB_REF_NAME#v}" = "$version"
@@ -37,4 +42,10 @@ jobs:
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS --title "$GITHUB_REF_NAME" --generate-notes
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="$GITHUB_REF_NAME"
+          fi
+          gh release create "$TAG" dist/*.tar.gz dist/SHA256SUMS --title "$TAG" --generate-notes
