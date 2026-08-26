@@ -39,6 +39,7 @@ export function startConfigLoader(store: PluginStore): ConfigLoader {
     // putting the plugin back to inert.
     let epoch = 0;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let cancelWait: (() => void) | null = null;
     let stopped = false;
 
     const clear = () => {
@@ -46,17 +47,30 @@ export function startConfigLoader(store: PluginStore): ConfigLoader {
             clearTimeout(timer);
             timer = null;
         }
+        cancelWait?.();
+        cancelWait = null;
     };
 
-    // Supersession is handled by `clear()` in `start`/`stop` — a cancelled timer
-    // never fires — and by the epoch check after each request. There is
-    // deliberately no epoch test here: it could never be false, and a guard no
-    // test can reach is not a guard.
+    // `clear()` resolves an active wait as cancelled. Clearing only the timer
+    // would leave its promise (and the old sequence awaiting it) alive forever.
     const waitFor = (ms: number) => new Promise<boolean>((resolve) => {
         clear();
+        let settled = false;
+        const settle = (result: boolean) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            if (cancelWait === cancel) {
+                cancelWait = null;
+            }
+            resolve(result);
+        };
+        const cancel = () => settle(false);
+        cancelWait = cancel;
         timer = setTimeout(() => {
             timer = null;
-            resolve(!stopped);
+            settle(!stopped);
         }, ms);
     });
 
@@ -102,6 +116,9 @@ export function startConfigLoader(store: PluginStore): ConfigLoader {
     };
 
     const start = (): Promise<boolean> => {
+        if (stopped) {
+            return Promise.resolve(false);
+        }
         clear();
         epoch += 1;
         return runSequence(epoch);

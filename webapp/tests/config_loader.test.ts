@@ -206,4 +206,59 @@ describe('startConfigLoader', () => {
         expect((console.error as jest.Mock).mock.calls[0]).toContain(cause);
         loader.stop();
     });
+
+    it('settles a superseded reload during backoff without scheduling another request', async () => {
+        mockedLoad.mockResolvedValueOnce(true);
+        const loader = startConfigLoader(store);
+        await settle();
+
+        mockedLoad.mockResolvedValueOnce(false);
+        const firstReload = loader.reload();
+        await settle();
+        expect(jest.getTimerCount()).toBe(1);
+
+        mockedLoad.mockResolvedValueOnce(true);
+        await expect(loader.reload()).resolves.toBe(true);
+        await expect(firstReload).resolves.toBe(false);
+        expect(jest.getTimerCount()).toBe(0);
+
+        const callsAfterReload = mockedLoad.mock.calls.length;
+        await tick(CONFIG_RETRY_MAX_MS);
+        expect(mockedLoad).toHaveBeenCalledTimes(callsAfterReload);
+        loader.stop();
+    });
+
+    it('settles a reload as false when stop cancels its backoff', async () => {
+        mockedLoad.mockResolvedValueOnce(true);
+        const loader = startConfigLoader(store);
+        await settle();
+
+        mockedLoad.mockResolvedValueOnce(false);
+        const reload = loader.reload();
+        await settle();
+        expect(jest.getTimerCount()).toBe(1);
+
+        loader.stop();
+        await expect(reload).resolves.toBe(false);
+        expect(jest.getTimerCount()).toBe(0);
+
+        const callsAfterStop = mockedLoad.mock.calls.length;
+        await tick(CONFIG_RETRY_MAX_MS);
+        expect(mockedLoad).toHaveBeenCalledTimes(callsAfterStop);
+    });
+
+    it('does not restart or dispatch after stop', async () => {
+        mockedLoad.mockResolvedValueOnce(true);
+        const loader = startConfigLoader(store);
+        await settle();
+
+        loader.stop();
+        const callsBeforeReload = mockedLoad.mock.calls.length;
+        (store.dispatch as jest.Mock).mockClear();
+
+        await expect(loader.reload()).resolves.toBe(false);
+        expect(mockedLoad).toHaveBeenCalledTimes(callsBeforeReload);
+        expect(store.dispatch).not.toHaveBeenCalled();
+        expect(jest.getTimerCount()).toBe(0);
+    });
 });
