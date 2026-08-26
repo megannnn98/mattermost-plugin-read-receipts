@@ -8,6 +8,7 @@ const common = {
     },
     moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
+        '\\.css$': '<rootDir>/tests/__mocks__/styleMock.js',
     },
 };
 

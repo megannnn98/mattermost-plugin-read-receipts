@@ -86,7 +86,7 @@ describe('React 17 runtime', () => {
         const svg = container.querySelector('svg');
         expect(svg).not.toBeNull();
         expect(svg?.getAttribute('aria-label')).toBe('Прочитано');
-        const title = container.querySelector('.read-receipt-indicator')?.getAttribute('title');
+        const title = container.querySelector('.read-receipt-ticks-attachment')?.getAttribute('title');
         expect(title).toMatch(/^Прочитано в \d{2}:\d{2}$/);
     });
 });

@@ -1,0 +1,19 @@
+.read-receipt-plugin-active .post:not(.post--system) .post__body {
+    position: relative;
+}
+
+.read-receipt-plugin-active .read-receipt-ticks-portal-host,
+.read-receipt-plugin-active .read-receipt-ticks-attachment {
+    position: absolute;
+    right: 2px;
+    bottom: 2px;
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    line-height: 1;
+    pointer-events: auto;
+}
+
+.read-receipt-plugin-active .read-receipt-ticks-portal-host .read-receipt-ticks-attachment {
+    position: static;
+}

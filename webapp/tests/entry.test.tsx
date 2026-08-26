@@ -1,3 +1,5 @@
+import {act} from 'react-dom/test-utils';
+
 import {ReadReceiptsPlugin} from '../src/index';
 import {WS_EVENT} from '../src/websocket';
 
@@ -11,7 +13,6 @@ function makeRegistry() {
     return {
         registerReducer: jest.fn(),
         registerWebSocketEventHandler: jest.fn(),
-        registerPostMessageAttachmentComponent: jest.fn(),
         registerReconnectHandler: jest.fn(),
     };
 }
@@ -25,10 +26,16 @@ function makeStore() {
 }
 
 describe('plugin entry point', () => {
+    let rootEl: HTMLDivElement | null;
+
     afterEach(() => {
         delete (window as any).desktopAPI;
         delete (window as any).registerPlugin;
         jest.resetModules();
+        if (rootEl) {
+            rootEl.remove();
+            rootEl = null;
+        }
     });
 
     it('registers itself with the webapp through window.registerPlugin', () => {
@@ -52,21 +59,30 @@ describe('plugin entry point', () => {
         new ReadReceiptsPlugin().initialize(registry, makeStore());
 
         expect(registry.registerReducer).not.toHaveBeenCalled();
-        expect(registry.registerPostMessageAttachmentComponent).not.toHaveBeenCalled();
         expect(registry.registerWebSocketEventHandler).not.toHaveBeenCalled();
     });
 
-    it('registers reducer, component, websocket handler and reconnect handler on Desktop', () => {
+    it('registers reducer, websocket handler, reconnect handler and mounts portal root on Desktop', async () => {
         (window as any).desktopAPI = {getAppInfo: jest.fn().mockResolvedValue({name: 'Mattermost', version: '5.0.0'})};
         const registry = makeRegistry();
         const plugin = new ReadReceiptsPlugin();
         plugin.initialize(registry, makeStore());
 
         expect(registry.registerReducer).toHaveBeenCalledTimes(1);
-        expect(registry.registerPostMessageAttachmentComponent).toHaveBeenCalledTimes(1);
         expect(registry.registerWebSocketEventHandler).toHaveBeenCalledWith(WS_EVENT, expect.any(Function));
         expect(registry.registerReconnectHandler).toHaveBeenCalledWith(expect.any(Function));
 
+        rootEl = document.getElementById('read-receipt-root');
+        expect(rootEl).not.toBeNull();
+
+        // Flush effects so PluginStyles adds the body class.
+        await act(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        expect(document.body.classList.contains('read-receipt-plugin-active')).toBe(true);
+
         plugin.uninitialize();
+        expect(document.getElementById('read-receipt-root')).toBeNull();
+        expect(document.body.classList.contains('read-receipt-plugin-active')).toBe(false);
     });
 });

@@ -1,4 +1,4 @@
-import React, {useEffect, useRef} from 'react';
+import React, {useEffect} from 'react';
 
 import {sendReadReceipt} from '../actions';
 import {getStore} from '../store_ref';
@@ -11,7 +11,6 @@ import {GlobalState} from '../types';
 import {StatusTicks} from './status_ticks';
 import {
     isSufficientlyVisible,
-    resolveObservedElement,
     resolveScrollRoot,
     VISIBILITY_THRESHOLD,
     VISIBILITY_THRESHOLDS,
@@ -46,13 +45,20 @@ const isEqualDisplay = (
     b: {isOwn: boolean; isDM: boolean; readAt: number | null},
 ): boolean => a.isOwn === b.isOwn && a.isDM === b.isDM && a.readAt === b.readAt;
 
+function getPostElement(postId: string): HTMLElement | null {
+    const host = document.querySelector(`.read-receipt-ticks-portal-host[data-post-id="${postId}"]`);
+    if (host) {
+        return host.closest('.post') as HTMLElement | null;
+    }
+    const el = document.getElementById(`post_${postId}`);
+    return el;
+}
+
 interface ReadReceiptProps {
     postId: string;
 }
 
 export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
-    const sentinelRef = useRef<HTMLSpanElement>(null);
-
     const store = getStore();
 
     const {isOwn, isDM, readAt} = usePluginSelector(
@@ -78,10 +84,8 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
 
         const tracker = getVisibilityTracker();
 
-        // Own posts never auto-report; their display is driven purely by the
-        // received receipts/watermark state selectors above.
         const initial = getPostContext(store.getState(), postId);
-        if (!initial || initial.isOwn) {
+        if (!initial || initial.isOwn || !initial.isDM) {
             return;
         }
 
@@ -126,8 +130,6 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
                     status = 'sent';
                     return;
                 }
-                // The request failed — go back to idle so a later attempt can
-                // retry, and schedule one automatically after a backoff.
                 status = 'idle';
                 retryTimer = setTimeout(() => {
                     retryTimer = null;
@@ -148,20 +150,18 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
             }, DWELL_MS);
         };
 
-        // Resolve the observed element and its scrolling root before creating the
-        // observer: thresholds are relative to the root, and Mattermost's post
-        // list is only ~65% of the window, so measuring against the window makes
-        // the tall-post branch unreachable.
-        const observed = sentinelRef.current ? resolveObservedElement(sentinelRef.current) : null;
-        const observedRoot = observed ? resolveScrollRoot(observed) : null;
+        const postEl = getPostElement(postId);
+        if (!postEl) {
+            return;
+        }
+
+        const root = resolveScrollRoot(postEl);
 
         const observer = new IntersectionObserver((entries) => {
             for (const entry of entries) {
                 const visible = isSufficientlyVisible(entry, VISIBILITY_THRESHOLD);
                 sufficientlyVisible = visible;
                 if (!visible || !tracker.isActive() || status === 'pending') {
-                    // Leaving view, an inactive window, or a request in flight
-                    // cancels any pending dwell/backoff (unless already sent).
                     clearDwell();
                     if (status !== 'sent') {
                         clearRetry();
@@ -172,25 +172,19 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
                     startDwell();
                 }
             }
-        }, {threshold: VISIBILITY_THRESHOLDS, root: observedRoot});
+        }, {threshold: VISIBILITY_THRESHOLDS, root});
 
-        if (observed) {
-            observer.observe(observed);
-        }
+        observer.observe(postEl);
 
         const onVisibilityChange = (visibility: VisibilityState) => {
             const active = visibility.isVisible && visibility.isFocused && !visibility.isIdle;
             if (!active) {
-                // Blur/hidden/idle cancels any pending dwell or retry backoff.
                 clearDwell();
                 if (status !== 'sent') {
                     clearRetry();
                 }
                 return;
             }
-            // The window became active again (focus/visibility/idle). No new
-            // IntersectionObserver callback fires for a post that is already
-            // visible, so restart the dwell from the last known visibility.
             if (sufficientlyVisible && status === 'idle') {
                 startDwell();
             }
@@ -206,24 +200,10 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
             clearRetry();
             sufficientlyVisible = false;
         };
-        // `isDM` is a dependency on purpose: while the channel entity is not in
-        // the store yet the component renders nothing, so there is no sentinel
-        // for the observer to attach to. Re-running the effect once isDM flips
-        // to true is what actually binds the observer to the mounted sentinel.
     }, [postId, store, isDM]);
 
-    if (!isDM) {
-        return null;
-    }
-
     if (!isOwn) {
-        return (
-            <span
-                ref={sentinelRef}
-                style={{height: 0, width: 0, display: 'block'}}
-                aria-hidden='true'
-            />
-        );
+        return null;
     }
 
     if (!readAt) {
@@ -234,7 +214,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
 
     return (
         <div
-            className='read-receipt-indicator'
+            className='read-receipt-ticks-attachment'
             title={t(locale, 'readAt', {time})}
         >
             <StatusTicks label={t(locale, 'read')} />
