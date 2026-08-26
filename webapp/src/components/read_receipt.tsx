@@ -1,4 +1,4 @@
-import React, {useEffect} from 'react';
+import React, {useEffect, useState} from 'react';
 
 import {sendReadReceipt} from '../actions';
 import {getStore} from '../store_ref';
@@ -17,6 +17,9 @@ import {
 } from '../visibility_ratio';
 
 const DWELL_MS = 1000;
+// How long to keep looking for a post element that has not been rendered yet.
+// Bounded: a post that never appears must not leave a timer running.
+const ATTACH_RETRY_MS = [100, 300, 1000, 3000];
 const RETRY_BACKOFF_MS = 5000;
 
 type SendStatus = 'idle' | 'pending' | 'sent';
@@ -59,6 +62,9 @@ interface ReadReceiptProps {
 }
 
 export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
+    // Bumped when the post element finally turns up, to re-run the effect that
+    // attaches the visibility observer.
+    const [attachEpoch, setAttachEpoch] = useState(0);
     const store = getStore();
 
     const {isOwn, isDM, readAt} = usePluginSelector(
@@ -150,9 +156,33 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
             }, DWELL_MS);
         };
 
+        // The post element may not be in the DOM yet when this mounts — the list
+        // is virtualised and the element appears a tick later. Giving up here
+        // would mean no observer at all, and nothing would ever re-create it,
+        // so the read would never be reported for that post.
+        let attachTimer: ReturnType<typeof setTimeout> | null = null;
+        let attachAttempt = 0;
         const postEl = getPostElement(postId);
         if (!postEl) {
-            return;
+            const retryAttach = () => {
+                attachTimer = null;
+                if (disposed || attachAttempt >= ATTACH_RETRY_MS.length) {
+                    return;
+                }
+                if (getPostElement(postId)) {
+                    // Re-run the whole effect now that the element exists.
+                    setAttachEpoch((epoch) => epoch + 1);
+                    return;
+                }
+                attachTimer = setTimeout(retryAttach, ATTACH_RETRY_MS[attachAttempt++]);
+            };
+            attachTimer = setTimeout(retryAttach, ATTACH_RETRY_MS[attachAttempt++]);
+            return () => {
+                disposed = true;
+                if (attachTimer) {
+                    clearTimeout(attachTimer);
+                }
+            };
         }
 
         const root = resolveScrollRoot(postEl);
@@ -200,7 +230,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
             clearRetry();
             sufficientlyVisible = false;
         };
-    }, [postId, store, isDM]);
+    }, [postId, store, isDM, attachEpoch]);
 
     if (!isOwn) {
         return null;

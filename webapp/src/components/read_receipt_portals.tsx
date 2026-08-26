@@ -8,7 +8,7 @@ const PORTAL_RETRY_MS = [250, 1000, 3000, 5000];
 
 const portalHosts = new Map<string, HTMLElement>();
 
-function getOwnDmPostIds(): string[] {
+function collectDmPostIds(mine: boolean): string[] {
     const store = getStore();
     if (!store) {
         return [];
@@ -23,7 +23,7 @@ function getOwnDmPostIds(): string[] {
     const channels = state?.entities?.channels?.channels ?? {};
     const postIds: string[] = [];
     for (const post of Object.values(posts)) {
-        if (!post || post.user_id !== currentUserId) {
+        if (!post || (post.user_id === currentUserId) !== mine) {
             continue;
         }
         const channel = channels[post.channel_id];
@@ -32,6 +32,28 @@ function getOwnDmPostIds(): string[] {
         }
     }
     return postIds;
+}
+
+// Own posts are the ones that display a tick, so they get a portal host.
+function getOwnDmPostIds(): string[] {
+    return collectDmPostIds(true);
+}
+
+/**
+ * The other side's posts in a direct message — the ones this client is supposed
+ * to report as read.
+ *
+ * They are mounted too, and that is the whole point: `ReadReceipt` renders
+ * nothing for a post it does not own, but its effect is what creates the
+ * IntersectionObserver that reports the read. Mounting only own posts left the
+ * two halves disjoint — the component existed exactly where reporting is
+ * disabled — and the plugin could not produce a single receipt.
+ *
+ * No portal host for these: they render null, so a host would be an empty node
+ * inside Mattermost's DOM for nothing. The effect finds the post element by id.
+ */
+function getIncomingDmPostIds(): string[] {
+    return collectDmPostIds(false);
 }
 
 function getPostElement(postId: string): HTMLElement | null {
@@ -95,6 +117,31 @@ function cleanupStaleHosts(currentPostIds: Set<string>): void {
 const ReadReceiptPortals: React.FC = () => {
     const [, bumpRender] = useReducer((value: number) => value + 1, 0);
 
+    // Without this the component only ever re-renders on its own retry timers and
+    // on scroll/resize, so a message that arrives later gets no component — and
+    // for an incoming post that means no observer and no read reported at all.
+    // The identity check keeps the cost to one comparison per store notification:
+    // Redux hands back the same `posts` object when nothing about posts changed.
+    useEffect(() => {
+        const store = getStore();
+        if (!store) {
+            return undefined;
+        }
+        let lastPosts: unknown = null;
+        let lastChannels: unknown = null;
+        return store.subscribe(() => {
+            const state = store.getState();
+            const posts = state?.entities?.posts?.posts;
+            const channels = state?.entities?.channels?.channels;
+            if (posts === lastPosts && channels === lastChannels) {
+                return;
+            }
+            lastPosts = posts;
+            lastChannels = channels;
+            bumpRender();
+        });
+    }, []);
+
     useEffect(() => {
         const refresh = () => {
             const postIds = getOwnDmPostIds();
@@ -134,6 +181,7 @@ const ReadReceiptPortals: React.FC = () => {
     }, []);
 
     const postIds = getOwnDmPostIds();
+    const incomingPostIds = getIncomingDmPostIds();
 
     return (
         <>
@@ -147,6 +195,9 @@ const ReadReceiptPortals: React.FC = () => {
                     host,
                 );
             })}
+            {incomingPostIds.map((postId) => (
+                <ReadReceipt key={`incoming-${postId}`} postId={postId} />
+            ))}
         </>
     );
 };
