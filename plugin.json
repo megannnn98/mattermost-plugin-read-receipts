@@ -2,7 +2,7 @@
     "id": "com.integrasources.read-receipts",
     "name": "Read Receipts",
     "description": "Shows read receipts in direct, group, private and open Mattermost Desktop channels.",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "homepage_url": "https://github.com/megannnn98/mattermost-plugin-read-receipts",
     "support_url": "https://github.com/megannnn98/mattermost-plugin-read-receipts/issues",
     "icon_path": "assets/icon.svg",
