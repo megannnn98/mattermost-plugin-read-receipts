@@ -1,4 +1,4 @@
-import React, {useEffect, useReducer} from 'react';
+import React, {useEffect, useReducer, useRef} from 'react';
 import {createPortal} from 'react-dom';
 
 import ReadReceipt from './read_receipt';
@@ -134,6 +134,17 @@ function getPostElement(postId: string): HTMLElement | null {
         document.querySelector(`[data-post-id="${postId}"]`);
 }
 
+// Narrow lookup used both by the incoming-portal key and by the effect that
+// attaches the IntersectionObserver. Must match exactly — if the portal thinks
+// the element is present (key = ...-1) but the effect cannot find it, the
+// component mounts and the retry chain dies without ever creating the observer.
+// Incoming posts have no portal host, so the host-lookup branch is irrelevant
+// to them; keep the predicate to plain id lookup, which is what ReadReceipt's
+// getPostElement falls back to after the host miss.
+function getIncomingPostElement(postId: string): HTMLElement | null {
+    return document.getElementById(`post_${postId}`);
+}
+
 function getOrCreatePortalHost(postId: string): HTMLElement | null {
     const postEl = getPostElement(postId);
     if (!postEl) {
@@ -187,6 +198,13 @@ function cleanupStaleHosts(currentPostIds: Set<string>): void {
 
 const ReadReceiptPortals: React.FC = () => {
     const [, bumpRender] = useReducer((value: number) => value + 1, 0);
+    // Tracks which incoming post ids currently have a DOM element. Stored as a
+    // Set<string> of post ids that are present right now. Compared by identity
+    // on each resync/render to avoid unnecessary bumpRender when nothing about
+    // presence changed. Scroll/resize can bring virtualised posts into the DOM
+    // without a store notification, so this is the only hook that catches a
+    // late-DOM appearance after the attach-retry window has expired.
+    const lastIncomingPresence = useRef<Set<string>>(new Set());
 
     // Without this the component only ever re-renders on its own retry timers and
     // on scroll/resize, so a message that arrives later gets no component — and
@@ -236,13 +254,35 @@ const ReadReceiptPortals: React.FC = () => {
         const retryTimers = PORTAL_RETRY_MS.map((delay) => window.setTimeout(refresh, delay));
 
         const resync = () => {
-            const postIds = getOwnDmPostIds();
-            const hasMissing = postIds.some((postId) => {
+            const ownPostIds = getOwnDmPostIds();
+            const hasMissingOwn = ownPostIds.some((postId) => {
                 const host = portalHosts.get(postId);
                 return !host?.isConnected;
             });
-            if (hasMissing) {
+
+            // Track incoming presence independently of Redux notifications.
+            // Scroll/resize can bring virtualised posts into the DOM without
+            // touching the store; without this check, an incoming post whose
+            // attach-retry window expired would stay dead until the next
+            // store change.
+            const incomingPostIds = getIncomingDmPostIds();
+            const present = new Set<string>();
+            for (const postId of incomingPostIds) {
+                if (getIncomingPostElement(postId)) {
+                    present.add(postId);
+                }
+            }
+            const prev = lastIncomingPresence.current;
+            const presenceChanged =
+                present.size !== prev.size ||
+                ![...present].every((id) => prev.has(id));
+
+            if (hasMissingOwn) {
                 refresh();
+            }
+            if (presenceChanged) {
+                lastIncomingPresence.current = present;
+                bumpRender();
             }
         };
 
@@ -281,7 +321,9 @@ const ReadReceiptPortals: React.FC = () => {
                 // flips and React unmounts the old component (whose attach
                 // retry may have given up) and mounts a fresh one that will
                 // find the element and attach the observer on the first try.
-                const hasElement = !!getPostElement(postId);
+                // Use the same narrow lookup that ReadReceipt's effect uses,
+                // so the portal and the effect agree on presence.
+                const hasElement = !!getIncomingPostElement(postId);
                 return (
                     <ReadReceipt
                         key={`incoming-${postId}-${hasElement ? '1' : '0'}`}

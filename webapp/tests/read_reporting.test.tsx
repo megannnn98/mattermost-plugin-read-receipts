@@ -547,6 +547,10 @@ describe('channel scoping and late DOM', () => {
         });
         expect(MockIntersectionObserver.callbacks.length).toBe(0);
 
+        // Wipe the observed list so the next assertion proves the observer was
+        // freshly created on switch-back, not just surviving from before.
+        MockIntersectionObserver.observed.length = 0;
+
         // Switch back — fresh observer on the same (reused) DOM element.
         act(() => {
             state.entities.channels = {
@@ -638,5 +642,49 @@ describe('channel scoping and late DOM', () => {
         MockIntersectionObserver.callbacks.forEach((cb) => cb([VISIBLE]));
         act(() => jest.advanceTimersByTime(1500));
         expect(sendReadReceipt).not.toHaveBeenCalled();
+    });
+
+    // MEDIUM from review: late-DOM appearance via scroll (no store notification)
+    // must remount the incoming component and create the observer.
+    it('recreates the observer when a late post appears from scroll, without a store notification', () => {
+        const listeners: Array<() => void> = [];
+        const state: any = {
+            entities: {
+                users: {currentUserId: 'me', profiles: {}},
+                channels: {currentChannelId: 'dm1', channels: {dm1: {id: 'dm1', type: 'D'}}},
+                posts: {posts: {theirs: {id: 'theirs', user_id: 'other', channel_id: 'dm1', create_at: 1000}}},
+            },
+            'plugins-com.integrasources.read-receipts': {watermarks: {}, receipts: {}},
+        };
+        setStore({
+            getState: () => state,
+            dispatch: jest.fn(),
+            subscribe: (listener: () => void) => {
+                listeners.push(listener);
+                return () => listeners.splice(listeners.indexOf(listener), 1);
+            },
+        } as never);
+
+        // Render without the post element — attach retry starts and exhausts.
+        act(() => root.render(<ReadReceiptPortals/>));
+        expect(MockIntersectionObserver.observed).toHaveLength(0);
+
+        act(() => jest.advanceTimersByTime(5000));
+        expect(jest.getTimerCount()).toBe(0);
+        expect(MockIntersectionObserver.observed).toHaveLength(0);
+
+        // Post element appears via virtualised-list scroll — no store change.
+        renderPost('theirs');
+        act(() => {
+            window.dispatchEvent(new Event('scroll'));
+        });
+
+        // The portal key flips, fresh component mounts, observer attaches.
+        expect(MockIntersectionObserver.observed).toContain(document.getElementById('post_theirs'));
+        expect(MockIntersectionObserver.callbacks.length).toBe(1);
+
+        MockIntersectionObserver.callbacks.forEach((cb) => cb([VISIBLE]));
+        act(() => jest.advanceTimersByTime(1500));
+        expect(sendReadReceipt).toHaveBeenCalledWith('dm1', 'theirs', 1000);
     });
 });
