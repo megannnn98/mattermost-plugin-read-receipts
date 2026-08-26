@@ -8,30 +8,69 @@ const PORTAL_RETRY_MS = [250, 1000, 3000, 5000];
 
 const portalHosts = new Map<string, HTMLElement>();
 
+// Cached own/incoming DM post id lists. Both are rebuilt in one pass when any
+// of the cache keys change — posts, channels, or the current user. Returning
+// the cached array by reference is safe because every consumer only reads it
+// (syncPortalHosts, cleanupStaleHosts, some, map).
+//
+// A separate hasDmChanges check in the store subscription (checking whether the
+// changed posts are actually in DM channels) was considered and rejected: the
+// identity cache below already makes a noop notification two pointer
+// comparisons, and adding a second invalidation mechanism would be complexity
+// for a saving already solved.
+let cachedPostsRef: unknown = null;
+let cachedChannelsRef: unknown = null;
+let cachedUserId: string | null = null;
+let cachedOwn: string[] = [];
+let cachedIncoming: string[] = [];
+
 function collectDmPostIds(mine: boolean): string[] {
     const store = getStore();
+
+    // No store — invalidate cache and return empty. Do not hand back stale
+    // data from a previous session: uninitialize calls setStore(null) and the
+    // old posts reference would otherwise keep a large object alive.
     if (!store) {
-        return [];
-    }
-    const state = store.getState();
-    const currentUserId = state?.entities?.users?.currentUserId;
-    if (!currentUserId) {
+        cachedPostsRef = null;
+        cachedChannelsRef = null;
+        cachedUserId = null;
+        cachedOwn = [];
+        cachedIncoming = [];
         return [];
     }
 
+    const state = store.getState();
     const posts = state?.entities?.posts?.posts ?? {};
     const channels = state?.entities?.channels?.channels ?? {};
-    const postIds: string[] = [];
+    const userId = state?.entities?.users?.currentUserId ?? null;
+
+    if (posts === cachedPostsRef && channels === cachedChannelsRef && userId === cachedUserId) {
+        return mine ? cachedOwn : cachedIncoming;
+    }
+
+    cachedPostsRef = posts;
+    cachedChannelsRef = channels;
+    cachedUserId = userId;
+
+    const own: string[] = [];
+    const incoming: string[] = [];
     for (const post of Object.values(posts)) {
-        if (!post || (post.user_id === currentUserId) !== mine) {
+        if (!post) {
             continue;
         }
         const channel = channels[post.channel_id];
-        if (channel?.type === 'D') {
-            postIds.push(post.id);
+        if (channel?.type !== 'D') {
+            continue;
+        }
+        if (post.user_id === userId) {
+            own.push(post.id);
+        } else {
+            incoming.push(post.id);
         }
     }
-    return postIds;
+    cachedOwn = own;
+    cachedIncoming = incoming;
+    return mine ? cachedOwn : cachedIncoming;
 }
 
 // Own posts are the ones that display a tick, so they get a portal host.
@@ -120,8 +159,13 @@ const ReadReceiptPortals: React.FC = () => {
     // Without this the component only ever re-renders on its own retry timers and
     // on scroll/resize, so a message that arrives later gets no component — and
     // for an incoming post that means no observer and no read reported at all.
-    // The identity check keeps the cost to one comparison per store notification:
-    // Redux hands back the same `posts` object when nothing about posts changed.
+    //
+    // The identity check keeps the cost to two pointer comparisons per store
+    // notification: Redux hands back the same `posts`/`channels` objects when
+    // nothing about them changed. A deeper check (did the changed posts actually
+    // land in a DM channel?) was considered and rejected — the memoized
+    // collectDmPostIds below already makes a re-render cheap, and adding a second
+    // invalidation mechanism would be complexity for a saving already solved.
     useEffect(() => {
         const store = getStore();
         if (!store) {
