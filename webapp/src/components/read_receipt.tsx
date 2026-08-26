@@ -8,6 +8,7 @@ import {usePluginSelector} from '../hooks';
 import {getPostContext, shouldReportRead} from '../gating';
 import {selectPostReadAt} from '../selectors';
 import {GlobalState} from '../types';
+import {StatusTicks} from './status_ticks';
 import {
     isSufficientlyVisible,
     resolveObservedElement,
@@ -236,15 +237,7 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
             className='read-receipt-indicator'
             title={t(locale, 'readAt', {time})}
         >
-            <span
-                style={{
-                    color: 'var(--center-channel-color-rgb)',
-                    opacity: 0.56,
-                    fontSize: '0.75rem',
-                }}
-            >
-                {`✓✓ ${t(locale, 'read')} ${time}`}
-            </span>
+            <StatusTicks label={t(locale, 'read')} />
         </div>
     );
 };

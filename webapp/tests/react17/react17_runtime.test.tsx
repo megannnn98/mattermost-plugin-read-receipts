@@ -83,6 +83,10 @@ describe('React 17 runtime', () => {
         act(() => {
             (ReactDOM as any).render(<ReadReceipt postId="p1"/>, container);
         });
-        expect(container.textContent).toMatch(/^✓✓ Прочитано \d{2}:\d{2}$/);
+        const svg = container.querySelector('svg');
+        expect(svg).not.toBeNull();
+        expect(svg?.getAttribute('aria-label')).toBe('Прочитано');
+        const title = container.querySelector('.read-receipt-indicator')?.getAttribute('title');
+        expect(title).toMatch(/^Прочитано в \d{2}:\d{2}$/);
     });
 });

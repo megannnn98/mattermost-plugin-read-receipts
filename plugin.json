@@ -2,7 +2,7 @@
     "id": "com.integrasources.read-receipts",
     "name": "Read Receipts",
     "description": "Shows read receipts in 1:1 DM conversations on Mattermost Desktop.",
-    "version": "0.1.0",
+    "version": "0.2.2",
     "homepage_url": "https://github.com/megannnn98/mattermost-plugin-read-receipts",
     "support_url": "https://github.com/megannnn98/mattermost-plugin-read-receipts/issues",
     "icon_path": "assets/icon.svg",

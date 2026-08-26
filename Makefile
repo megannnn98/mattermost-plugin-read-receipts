@@ -1,5 +1,5 @@
 PLUGIN_ID ?= com.integrasources.read-receipts
-PLUGIN_VERSION ?= 0.1.0
+PLUGIN_VERSION ?= 0.2.2
 BUNDLE_NAME ?= $(PLUGIN_ID)-$(PLUGIN_VERSION).tar.gz
 
 # Optional local Go SDK: prepended only if the directory exists.
