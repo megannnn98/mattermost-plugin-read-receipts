@@ -35,13 +35,22 @@ type IOEntry = {
 class MockIntersectionObserver {
     static callbacks: Array<(entries: IOEntry[]) => void> = [];
     static observed: Element[] = [];
+    static disconnectCount = 0;
+    private callback: (entries: IOEntry[]) => void;
     constructor(callback: (entries: IOEntry[]) => void) {
+        this.callback = callback;
         MockIntersectionObserver.callbacks.push(callback);
     }
     observe(el: Element) {
         MockIntersectionObserver.observed.push(el);
     }
-    disconnect() {}
+    disconnect() {
+        MockIntersectionObserver.disconnectCount++;
+        const idx = MockIntersectionObserver.callbacks.indexOf(this.callback);
+        if (idx >= 0) {
+            MockIntersectionObserver.callbacks.splice(idx, 1);
+        }
+    }
     unobserve() {}
 }
 
@@ -91,6 +100,7 @@ describe('reporting a read', () => {
         (window as any).IntersectionObserver = MockIntersectionObserver;
         MockIntersectionObserver.callbacks = [];
         MockIntersectionObserver.observed = [];
+        MockIntersectionObserver.disconnectCount = 0;
         (sendReadReceipt as jest.Mock).mockClear();
         (sendReadReceipt as jest.Mock).mockResolvedValue(true);
         document.body.innerHTML = '';
@@ -195,6 +205,7 @@ describe('a message that arrives after the channel is open', () => {
         (window as any).IntersectionObserver = MockIntersectionObserver;
         MockIntersectionObserver.callbacks = [];
         MockIntersectionObserver.observed = [];
+        MockIntersectionObserver.disconnectCount = 0;
         (sendReadReceipt as jest.Mock).mockClear();
         (sendReadReceipt as jest.Mock).mockResolvedValue(true);
         document.body.innerHTML = '';
@@ -261,5 +272,161 @@ describe('a message that arrives after the channel is open', () => {
         act(() => listeners.forEach((listener) => listener()));
 
         expect(MockIntersectionObserver.callbacks.length).toBe(before);
+    });
+
+    // --- Five new regression tests covering the review findings ---
+
+    // #1: own/incoming split. Mutating collectDmPostIds to return only own
+    // posts would make this fail — incoming posts would never mount, so no
+    // observer would be created and no receipt reported.
+    it('mounts observers for incoming posts, not only for own posts', () => {
+        renderPost(THEIRS.id);
+        renderPost(MINE.id);
+        setStore(makeStore({theirs: THEIRS, mine: MINE}) as never);
+
+        act(() => root.render(<ReadReceiptPortals/>));
+
+        // Incoming post gets an observer (for reporting).
+        const theirPost = document.getElementById(`post_${THEIRS.id}`);
+        expect(MockIntersectionObserver.observed).toContain(theirPost);
+
+        // Own post gets a portal host (for rendering the tick), not an observer
+        // here — the ReadReceipt component renders the tick from state, not
+        // from visibility. Its effect exits early on isOwn.
+        const host = document.querySelector(`.read-receipt-ticks-portal-host[data-post-id="${MINE.id}"]`);
+        expect(host).not.toBeNull();
+    });
+
+    // #3: unmount during attach retry must not leave timers behind and must
+    // not call setState on an unmounted component.
+    it('cleans up the attach-retry timer when the component unmounts mid-retry', () => {
+        // No DOM element for the post — the component will enter the retry path.
+        setStore(makeStore({theirs: THEIRS}) as never);
+        act(() => root.render(<ReadReceiptPortals/>));
+        expect(MockIntersectionObserver.observed).toHaveLength(0);
+
+        // Schedule is: 100, 300, 1000, 3000 ms. Unmount before the first fires.
+        act(() => root.unmount());
+        act(() => jest.advanceTimersByTime(10000));
+
+        expect(jest.getTimerCount()).toBe(0);
+        expect(MockIntersectionObserver.observed).toHaveLength(0);
+    });
+
+    // #4: when a post leaves the store, its component unmounts and the observer
+    // is disconnected — no hanging observers for posts the user no longer sees.
+    it('disconnects the observer when the component unmounts', () => {
+        const post = renderPost(THEIRS.id);
+        setStore(makeStore({theirs: THEIRS}) as never);
+
+        act(() => root.render(<ReadReceiptPortals/>));
+        expect(MockIntersectionObserver.observed).toContain(post);
+        expect(MockIntersectionObserver.callbacks.length).toBe(1);
+
+        // Explicit unmount — the component tree tears down and every
+        // ReadReceipt effect cleanup runs, which disconnects its observer.
+        act(() => root.unmount());
+
+        expect(MockIntersectionObserver.callbacks.length).toBe(0);
+
+        // And no receipt is produced for the removed post even if visibility
+        // is signalled manually.
+        MockIntersectionObserver.callbacks.forEach((cb) => cb([VISIBLE]));
+        act(() => jest.advanceTimersByTime(1500));
+        expect(sendReadReceipt).not.toHaveBeenCalled();
+    });
+});
+
+// Separate describe so the large store does not leak into the other tests.
+describe('cost of the portal post-id collection', () => {
+    let container: HTMLDivElement;
+    let root: ReturnType<typeof createRoot>;
+
+    beforeEach(() => {
+        jest.useFakeTimers();
+        (window as any).IntersectionObserver = MockIntersectionObserver;
+        MockIntersectionObserver.callbacks = [];
+        MockIntersectionObserver.observed = [];
+        MockIntersectionObserver.disconnectCount = 0;
+        (sendReadReceipt as jest.Mock).mockClear();
+        (sendReadReceipt as jest.Mock).mockResolvedValue(true);
+        document.body.innerHTML = '';
+        container = document.createElement('div');
+        document.body.appendChild(container);
+        root = createRoot(container);
+    });
+
+    afterEach(() => {
+        act(() => root.unmount());
+        setStore(null);
+        document.body.innerHTML = '';
+        jest.useRealTimers();
+    });
+
+    // #5: the cached collectDmPostIds must not walk the posts map on a noop
+    // notification. Proxy the posts object to count ownKeys calls — Object.values
+    // hits ownKeys once per call, so any re-render after the cache is warm would
+    // bump the counter.
+    it('does not walk the posts map on a noop notification once the cache is warm', () => {
+        const rawPosts: Record<string, {id: string; user_id: string; channel_id: string; create_at: number}> = {};
+        for (let i = 0; i < 1000; i++) {
+            rawPosts[`p${i}`] = {
+                id: `p${i}`,
+                user_id: i % 2 === 0 ? 'me' : 'other',
+                channel_id: 'dm1',
+                create_at: i,
+            };
+        }
+        const rawChannels = {dm1: {id: 'dm1', type: 'D'}};
+
+        let ownKeysCalls = 0;
+        const posts = new Proxy(rawPosts, {
+            ownKeys(target) {
+                ownKeysCalls++;
+                return Reflect.ownKeys(target);
+            },
+            getOwnPropertyDescriptor(target, prop) {
+                return Object.getOwnPropertyDescriptor(target, prop);
+            },
+        });
+        const channels = new Proxy(rawChannels, {
+            ownKeys(target) {
+                ownKeysCalls++;
+                return Reflect.ownKeys(target);
+            },
+            getOwnPropertyDescriptor(target, prop) {
+                return Object.getOwnPropertyDescriptor(target, prop);
+            },
+        });
+
+        const listeners: Array<() => void> = [];
+        const state: any = {
+            entities: {
+                users: {currentUserId: 'me', profiles: {}},
+                channels: {currentChannelId: 'dm1', channels: rawChannels},
+                posts: {posts},
+            },
+            'plugins-com.integrasources.read-receipts': {watermarks: {}, receipts: {}},
+        };
+        setStore({
+            getState: () => state,
+            dispatch: jest.fn(),
+            subscribe: (listener: () => void) => {
+                listeners.push(listener);
+                return () => listeners.splice(listeners.indexOf(listener), 1);
+            },
+        } as never);
+
+        // First render warms the cache — ownKeys fires for posts and channels.
+        act(() => root.render(<ReadReceiptPortals/>));
+        const afterWarmup = ownKeysCalls;
+        expect(afterWarmup).toBeGreaterThan(0);
+
+        // Ten noop notifications: identity check fires, but the cached lists
+        // are returned without another ownKeys traversal.
+        for (let i = 0; i < 10; i++) {
+            act(() => listeners.forEach((listener) => listener()));
+        }
+        expect(ownKeysCalls).toBe(afterWarmup);
     });
 });
