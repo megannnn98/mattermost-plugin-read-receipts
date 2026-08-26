@@ -164,7 +164,10 @@ export async function loadPostReaders(store: PluginStore, postId: string, offset
  * plugin stays inert, so a type an administrator disabled never gets an indicator
  * or a read report — rather than being discovered from a 403 after the fact.
  */
-export async function loadPluginConfig(store: PluginStore): Promise<boolean> {
+export async function loadPluginConfig(
+    store: PluginStore,
+    onFailure?: (error: unknown) => void,
+): Promise<boolean> {
     const generation = ++configRequestGeneration;
     // Reconnect must fail closed: a cached allow-list may have been disabled by
     // an administrator while the websocket was down.
@@ -181,8 +184,10 @@ export async function loadPluginConfig(store: PluginStore): Promise<boolean> {
             return false;
         }
         // Not console.error: at startup this is usually a race with the session
-        // that the caller retries out of. The loader reports the give-up.
+        // that the caller retries out of. The loader keeps the cause and reports
+        // it if the whole sequence gives up.
         console.debug(`[${PLUGIN_ID}] Failed to load plugin configuration:`, error);
+        onFailure?.(error);
         return false;
     }
 }
