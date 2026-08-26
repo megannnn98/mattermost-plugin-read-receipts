@@ -645,7 +645,9 @@ describe('channel scoping and late DOM', () => {
     });
 
     // MEDIUM from review: late-DOM appearance via scroll (no store notification)
-    // must remount the incoming component and create the observer.
+    // must remount the incoming component and create the observer. Tests the
+    // real order: scroll fires first (capture phase), then the virtualised
+    // list renders the post, then rAF re-checks presence.
     it('recreates the observer when a late post appears from scroll, without a store notification', () => {
         const listeners: Array<() => void> = [];
         const state: any = {
@@ -665,26 +667,55 @@ describe('channel scoping and late DOM', () => {
             },
         } as never);
 
-        // Render without the post element — attach retry starts and exhausts.
-        act(() => root.render(<ReadReceiptPortals/>));
-        expect(MockIntersectionObserver.observed).toHaveLength(0);
+        // Mock rAF to run synchronously inside act(), since jest fake timers
+        // do not advance rAF callbacks automatically.
+        const realRaf = window.requestAnimationFrame;
+        let rafCallback: FrameRequestCallback | null = null;
+        (window as any).requestAnimationFrame = (cb: FrameRequestCallback) => {
+            rafCallback = cb;
+            return 1;
+        };
+        (window as any).cancelAnimationFrame = () => { rafCallback = null; };
 
-        act(() => jest.advanceTimersByTime(5000));
-        expect(jest.getTimerCount()).toBe(0);
-        expect(MockIntersectionObserver.observed).toHaveLength(0);
+        try {
+            // Render without the post element — attach retry starts and exhausts.
+            act(() => root.render(<ReadReceiptPortals/>));
+            expect(MockIntersectionObserver.observed).toHaveLength(0);
 
-        // Post element appears via virtualised-list scroll — no store change.
-        renderPost('theirs');
-        act(() => {
-            window.dispatchEvent(new Event('scroll'));
-        });
+            act(() => jest.advanceTimersByTime(5000));
+            expect(jest.getTimerCount()).toBe(0);
+            expect(MockIntersectionObserver.observed).toHaveLength(0);
 
-        // The portal key flips, fresh component mounts, observer attaches.
-        expect(MockIntersectionObserver.observed).toContain(document.getElementById('post_theirs'));
-        expect(MockIntersectionObserver.callbacks.length).toBe(1);
+            // Real order: scroll fires (capture phase) BEFORE the list renders.
+            act(() => {
+                window.dispatchEvent(new Event('scroll'));
+            });
 
-        MockIntersectionObserver.callbacks.forEach((cb) => cb([VISIBLE]));
-        act(() => jest.advanceTimersByTime(1500));
-        expect(sendReadReceipt).toHaveBeenCalledWith('dm1', 'theirs', 1000);
+            // rAF callback is pending — element still absent, no observer yet.
+            expect(MockIntersectionObserver.observed).toHaveLength(0);
+
+            // Now the list renders the post (simulating the bubble-phase scroll
+            // handler of the virtualised list).
+            renderPost('theirs');
+
+            // Fire the pending rAF — presence re-check sees the new element.
+            act(() => {
+                if (rafCallback) {
+                    rafCallback(0);
+                    rafCallback = null;
+                }
+            });
+
+            // The portal key flips, fresh component mounts, observer attaches.
+            expect(MockIntersectionObserver.observed).toContain(document.getElementById('post_theirs'));
+            expect(MockIntersectionObserver.callbacks.length).toBe(1);
+
+            MockIntersectionObserver.callbacks.forEach((cb) => cb([VISIBLE]));
+            act(() => jest.advanceTimersByTime(1500));
+            expect(sendReadReceipt).toHaveBeenCalledWith('dm1', 'theirs', 1000);
+        } finally {
+            (window as any).requestAnimationFrame = realRaf;
+            (window as any).cancelAnimationFrame = realRaf;
+        }
     });
 });

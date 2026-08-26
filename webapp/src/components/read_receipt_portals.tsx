@@ -198,12 +198,11 @@ function cleanupStaleHosts(currentPostIds: Set<string>): void {
 
 const ReadReceiptPortals: React.FC = () => {
     const [, bumpRender] = useReducer((value: number) => value + 1, 0);
-    // Tracks which incoming post ids currently have a DOM element. Stored as a
-    // Set<string> of post ids that are present right now. Compared by identity
-    // on each resync/render to avoid unnecessary bumpRender when nothing about
-    // presence changed. Scroll/resize can bring virtualised posts into the DOM
-    // without a store notification, so this is the only hook that catches a
-    // late-DOM appearance after the attach-retry window has expired.
+    // Tracks which incoming post ids currently have a DOM element. Compared
+    // in checkIncomingPresence (called from resync via rAF) — bumpRenders only
+    // when the set actually changes. Scroll/resize can bring virtualised posts
+    // into the DOM without a store notification, so this is the hook that
+    // catches a late-DOM appearance after the attach-retry window has expired.
     const lastIncomingPresence = useRef<Set<string>>(new Set());
 
     // Without this the component only ever re-renders on its own retry timers and
@@ -253,18 +252,25 @@ const ReadReceiptPortals: React.FC = () => {
 
         const retryTimers = PORTAL_RETRY_MS.map((delay) => window.setTimeout(refresh, delay));
 
-        const resync = () => {
-            const ownPostIds = getOwnDmPostIds();
-            const hasMissingOwn = ownPostIds.some((postId) => {
-                const host = portalHosts.get(postId);
-                return !host?.isConnected;
+        // Re-check incoming presence after the current frame. Virtualised
+        // lists render their posts in a scroll handler that runs in the
+        // bubble phase — resync (capture phase) fires first, before the
+        // element exists. Deferring to rAF lets the list render, then we
+        // compare against the cached presence set. A single rAF per burst
+        // of scroll events keeps the cost bounded (one N-DOM-lookup pass
+        // per visual frame, not per scroll event).
+        let pendingRaf = 0;
+        const schedulePresenceCheck = () => {
+            if (pendingRaf) {
+                return;
+            }
+            pendingRaf = window.requestAnimationFrame(() => {
+                pendingRaf = 0;
+                checkIncomingPresence();
             });
+        };
 
-            // Track incoming presence independently of Redux notifications.
-            // Scroll/resize can bring virtualised posts into the DOM without
-            // touching the store; without this check, an incoming post whose
-            // attach-retry window expired would stay dead until the next
-            // store change.
+        const checkIncomingPresence = () => {
             const incomingPostIds = getIncomingDmPostIds();
             const present = new Set<string>();
             for (const postId of incomingPostIds) {
@@ -277,13 +283,25 @@ const ReadReceiptPortals: React.FC = () => {
                 present.size !== prev.size ||
                 ![...present].every((id) => prev.has(id));
 
-            if (hasMissingOwn) {
-                refresh();
-            }
             if (presenceChanged) {
                 lastIncomingPresence.current = present;
                 bumpRender();
             }
+        };
+
+        const resync = () => {
+            const ownPostIds = getOwnDmPostIds();
+            const hasMissingOwn = ownPostIds.some((postId) => {
+                const host = portalHosts.get(postId);
+                return !host?.isConnected;
+            });
+            if (hasMissingOwn) {
+                refresh();
+            }
+            // Always re-check incoming presence after the frame — scroll may
+            // have brought virtualised posts into the DOM, and the capture-
+            // phase resync fires before the list's own scroll handler runs.
+            schedulePresenceCheck();
         };
 
         window.addEventListener('scroll', resync, true);
@@ -293,6 +311,9 @@ const ReadReceiptPortals: React.FC = () => {
             retryTimers.forEach((timerId) => window.clearTimeout(timerId));
             window.removeEventListener('scroll', resync, true);
             window.removeEventListener('resize', resync);
+            if (pendingRaf) {
+                window.cancelAnimationFrame(pendingRaf);
+            }
             for (const host of portalHosts.values()) {
                 host.remove();
             }
