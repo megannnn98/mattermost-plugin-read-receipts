@@ -170,8 +170,14 @@ export const ReadReceipt: React.FC<ReadReceiptProps> = ({postId}) => {
                     return;
                 }
                 if (getPostElement(postId)) {
-                    // Re-run the whole effect now that the element exists.
-                    setAttachEpoch((epoch) => epoch + 1);
+                    if (!disposed) {
+                        // Re-run the whole effect now that the element exists.
+                        // Guard against unmount between the DOM lookup and the
+                        // setState: React would warn about setState on an
+                        // unmounted component, which is noise in a console used
+                        // for diagnostics.
+                        setAttachEpoch((epoch) => epoch + 1);
+                    }
                     return;
                 }
                 attachTimer = setTimeout(retryAttach, ATTACH_RETRY_MS[attachAttempt++]);
